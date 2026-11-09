@@ -366,6 +366,9 @@ func renderExtendEstimates(bw *bufWriter, s styler, estimates []probe.ExtendEsti
 func renderEntry(bw *bufWriter, s styler, label string, e probe.EntryReport) {
 	bw.printf("  %-10s %s\n", label, s.status(e.Status))
 	bw.printf("  %-10s %s\n", "", s.dim(e.Summary))
+	if e.Remediation != "" {
+		bw.printf("  %-10s %s\n", "", s.cyan("hint: "+e.Remediation))
+	}
 }
 
 func renderCheck(w io.Writer, r *probe.CheckResult) error {

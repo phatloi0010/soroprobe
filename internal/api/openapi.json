@@ -663,6 +663,9 @@
           },
           "summary": {
             "type": "string"
+          },
+          "remediation": {
+            "type": "string"
           }
         },
         "required": [

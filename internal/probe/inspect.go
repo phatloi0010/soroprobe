@@ -64,6 +64,10 @@ type EntryReport struct {
 	health.TTL
 	// Summary is a human-readable one-liner.
 	Summary string `json:"summary"`
+	// Remediation suggests the stellar CLI command to extend or restore an
+	// entry in warning, critical or expired state, or explains why a temporary
+	// entry cannot be restored. Empty for healthy, missing or unknown entries.
+	Remediation string `json:"remediation,omitempty"`
 	// Thresholds are the warning and critical thresholds used for this entry.
 	Thresholds health.Thresholds `json:"thresholds"`
 }
@@ -177,6 +181,9 @@ func (p *Prober) inspectUncached(ctx context.Context, req InspectRequest) (*Insp
 		Thresholds: instanceThresholds,
 	}
 	result.Instance.Summary = entrySummary(result.Instance.Describe(), instanceThresholds)
+	result.Instance.Remediation = SuggestRemediation(
+		"instance", req.ContractID, "", "", result.Instance.Durability, result.Instance.Status, instanceThresholds,
+	)
 
 	wasmHash, err := p.readInstanceEntry(instance, result)
 	if err != nil {
@@ -193,12 +200,15 @@ func (p *Prober) inspectUncached(ctx context.Context, req InspectRequest) (*Insp
 			report.Durability = plan.durability
 		}
 		report.Summary = entrySummary(report.Describe(), dataThresholds)
+		report.Remediation = SuggestRemediation(
+			"data", req.ContractID, "", dk.spec, report.Durability, report.Status, dataThresholds,
+		)
 		result.Data = append(result.Data, report)
 	}
 
 	// Round two: the code entry, now that the Wasm hash is known.
 	if wasmHash != nil {
-		codeReport, err := p.inspectCode(ctx, *wasmHash, closeTime)
+		codeReport, err := p.inspectCode(ctx, req.ContractID, *wasmHash, closeTime)
 		if err != nil {
 			return nil, err
 		}
@@ -399,7 +409,7 @@ func (p *Prober) planInspect(req InspectRequest) (*inspectPlan, error) {
 	return &inspectPlan{contract: contract, instanceKey: instanceKey, dataKeys: dataKeys, keys: keys, durability: durability}, nil
 }
 
-func (p *Prober) inspectCode(ctx context.Context, hash xdr.Hash, closeTime time.Duration) (*EntryReport, error) {
+func (p *Prober) inspectCode(ctx context.Context, contractID string, hash xdr.Hash, closeTime time.Duration) (*EntryReport, error) {
 	key, err := stellar.EncodeKey(stellar.CodeKey(hash))
 	if err != nil {
 		return nil, err
@@ -420,7 +430,64 @@ func (p *Prober) inspectCode(ctx context.Context, hash xdr.Hash, closeTime time.
 
 	report.TTL = health.EvaluateWithCloseTime(resp.Entries[0].LiveUntilLedgerSeq, resp.LatestLedger, health.DurabilityPersistent, thresholds, closeTime)
 	report.Summary = entrySummary(report.Describe(), thresholds)
+	report.Remediation = SuggestRemediation(
+		"code", contractID, hex.EncodeToString(hash[:]), "", report.Durability, report.Status, thresholds,
+	)
 	return report, nil
+}
+
+// SuggestRemediation returns the stellar CLI command to extend or restore an
+// expiring or expired entry, or "" when no action is needed.
+//
+// For warning and critical entries, the suggested --ledgers-to-extend is
+// 2 * thresholds.Warn (falling back to 2 * DefaultThresholds.Warn when Warn is
+// zero), which brings the entry's remaining TTL to twice the warning threshold
+// — a full warning window of margin above the warning boundary.
+//
+// Expired persistent entries suggest `stellar contract restore`; expired
+// temporary entries cannot be restored and say so explicitly.
+func SuggestRemediation(kind, contractID, wasmHash, key string, durability health.Durability, status health.Status, thresholds health.Thresholds) string {
+	if durability == "" {
+		durability = health.DurabilityPersistent
+	}
+
+	switch status {
+	case health.StatusWarning, health.StatusCritical:
+		warn := thresholds.Warn
+		if warn == 0 {
+			warn = health.DefaultThresholds.Warn
+		}
+		ledgers := warn * 2
+		switch kind {
+		case "instance":
+			return fmt.Sprintf("stellar contract extend --id %s --durability persistent --ledgers-to-extend %d", contractID, ledgers)
+		case "code":
+			if wasmHash != "" {
+				return fmt.Sprintf("stellar contract extend --wasm-hash %s --durability persistent --ledgers-to-extend %d", wasmHash, ledgers)
+			}
+			return fmt.Sprintf("stellar contract extend --id %s --durability persistent --ledgers-to-extend %d", contractID, ledgers)
+		case "data":
+			return fmt.Sprintf("stellar contract extend --id %s --key %s --durability %s --ledgers-to-extend %d", contractID, key, durability, ledgers)
+		}
+
+	case health.StatusExpired:
+		if !durability.Archivable() {
+			return "temporary entry has expired and was deleted permanently; it cannot be restored"
+		}
+		switch kind {
+		case "instance":
+			return fmt.Sprintf("stellar contract restore --id %s --durability persistent", contractID)
+		case "code":
+			if wasmHash != "" {
+				return fmt.Sprintf("stellar contract restore --wasm-hash %s --durability persistent", wasmHash)
+			}
+			return fmt.Sprintf("stellar contract restore --id %s --durability persistent", contractID)
+		case "data":
+			return fmt.Sprintf("stellar contract restore --id %s --key %s --durability persistent", contractID, key)
+		}
+	}
+
+	return ""
 }
 
 func (p *Prober) thresholdsFor(kind health.EntryKind) health.Thresholds {

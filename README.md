@@ -384,6 +384,16 @@ An entry that **cannot** be extended says so instead of quoting a price: a
 missing entry has nothing to extend, and an expired one must be restored
 before it can be extended.
 
+**Remediation hints.** When an entry is in `warning` or `critical`, `inspect`
+suggests the `stellar contract extend` command for that entry (`--id`,
+`--wasm-hash`, or `--key` + `--durability`) with `--ledgers-to-extend` set to
+twice the warning threshold (`2 * warn`), bringing the entry back above the
+warning threshold with a full warning window of margin. When an entry has
+already `expired`, persistent entries suggest `stellar contract restore`, while
+expired temporary entries state that they were deleted permanently and cannot
+be restored. Healthy entries carry no remediation hint. SoroProbe remains
+strictly read-only and never executes the suggested command.
+
 ### `soroprobe check <contract-id>`
 
 Combined health check, designed for CI.

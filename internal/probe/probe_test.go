@@ -533,6 +533,116 @@ func TestInspectPropagatesTransportErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "rpc unreachable")
 }
 
+func TestSuggestRemediation(t *testing.T) {
+	t.Parallel()
+
+	thresholds := health.Thresholds{Warn: 120_960, Critical: 17_280}
+	tests := []struct {
+		name       string
+		kind       string
+		contractID string
+		wasmHash   string
+		key        string
+		durability health.Durability
+		status     health.Status
+		want       string
+	}{
+		{
+			name:       "healthy instance has no remediation",
+			kind:       "instance",
+			contractID: "CDLZ",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusHealthy,
+			want:       "",
+		},
+		{
+			name:       "warning instance suggests extend",
+			kind:       "instance",
+			contractID: "CDLZ",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusWarning,
+			want:       "stellar contract extend --id CDLZ --durability persistent --ledgers-to-extend 241920",
+		},
+		{
+			name:       "critical code suggests extend by wasm-hash",
+			kind:       "code",
+			contractID: "CDLZ",
+			wasmHash:   "deadbeef",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusCritical,
+			want:       "stellar contract extend --wasm-hash deadbeef --durability persistent --ledgers-to-extend 241920",
+		},
+		{
+			name:       "warning temporary data suggests extend with temporary durability",
+			kind:       "data",
+			contractID: "CDLZ",
+			key:        "sym:Nonce",
+			durability: health.DurabilityTemporary,
+			status:     health.StatusWarning,
+			want:       "stellar contract extend --id CDLZ --key sym:Nonce --durability temporary --ledgers-to-extend 241920",
+		},
+		{
+			name:       "expired persistent data suggests restore",
+			kind:       "data",
+			contractID: "CDLZ",
+			key:        "sym:Admin",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusExpired,
+			want:       "stellar contract restore --id CDLZ --key sym:Admin --durability persistent",
+		},
+		{
+			name:       "expired instance suggests restore",
+			kind:       "instance",
+			contractID: "CDLZ",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusExpired,
+			want:       "stellar contract restore --id CDLZ --durability persistent",
+		},
+		{
+			name:       "expired temporary data explains it cannot be restored",
+			kind:       "data",
+			contractID: "CDLZ",
+			key:        "sym:Nonce",
+			durability: health.DurabilityTemporary,
+			status:     health.StatusExpired,
+			want:       "temporary entry has expired and was deleted permanently; it cannot be restored",
+		},
+		{
+			name:       "missing entry has no remediation",
+			kind:       "data",
+			contractID: "CDLZ",
+			key:        "sym:Missing",
+			durability: health.DurabilityPersistent,
+			status:     health.StatusMissing,
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := probe.SuggestRemediation(tt.kind, tt.contractID, tt.wasmHash, tt.key, tt.durability, tt.status, thresholds)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestInspectPopulatesRemediationAndOmitsCodeForSAC(t *testing.T) {
+	t.Parallel()
+
+	instanceKey := stellartest.InstanceKeyOf(t, stellartest.SACContract)
+	fake := stellartest.NewFake(t)
+	fake.SetTTL(t, instanceKey, fake.LatestLedger+50_000)
+	p := newProber(t, fake, health.DefaultThresholds)
+
+	result, err := p.Inspect(context.Background(), probe.InspectRequest{
+		ContractID: stellartest.SACContract,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Instance.Remediation, "stellar contract extend --id "+stellartest.SACContract)
+	assert.Nil(t, result.Code, "Stellar Asset Contract has no code entry and no code remediation")
+}
+
 // --- check ------------------------------------------------------------------
 
 // outcomes indexes a check result by check name.

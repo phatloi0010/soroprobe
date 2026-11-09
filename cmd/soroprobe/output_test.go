@@ -473,3 +473,24 @@ func TestRenderSimulateRestoreRequiredListsArchivedEntries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "archived: contract data C... (persistent)")
 }
+
+func TestRenderInspectPrintsRemediationHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := renderInspect(&buf, &probe.InspectResult{
+		ContractID: "CDLZ",
+		Deployed:   true,
+		Executable: "stellar_asset",
+		Instance: probe.EntryReport{
+			Kind:        "instance",
+			TTL:         health.TTL{Status: health.StatusWarning},
+			Summary:     "live for 50000 more ledgers",
+			Remediation: "stellar contract extend --id CDLZ --durability persistent --ledgers-to-extend 241920",
+		},
+		Status:       health.StatusWarning,
+		LatestLedger: 4000000,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "hint: stellar contract extend --id CDLZ --durability persistent --ledgers-to-extend 241920")
+}
