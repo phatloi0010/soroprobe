@@ -373,6 +373,7 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var rentPayer string
 
 	cmd := &cobra.Command{
 		Use:   "check <contract-id> | check --file <checks.json>",
@@ -448,7 +449,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			defer func() { err = errors.Join(err, report.close()) }()
 
 			if file != "" {
-				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat)
+				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat, rentPayer)
 			}
 
 			d, err := parseDurability(durability)
@@ -474,6 +475,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
+				RentPayer:      rentPayer,
 			})
 			if err != nil {
 				return err
@@ -510,6 +512,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
+	cmd.Flags().StringVar(&rentPayer, "rent-payer", "", "Stellar account (G...) whose spendable balance is checked against estimated extension fees")
 	return cmd
 }
 
@@ -526,12 +529,19 @@ func selectOutputFormat(cmd *cobra.Command, opts *options, format string) (strin
 }
 
 // runCheckFile runs a batch of checks read from path.
-func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool, format string) error {
+func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool, format string, rentPayer string) error {
 	req, err := readBatch(cmd.InOrStdin(), path)
 	if err != nil {
 		return err
 	}
 	applyDefaultTimeout(&req, checkTimeout)
+	if rentPayer != "" {
+		for i := range req.Checks {
+			if req.Checks[i].RentPayer == "" {
+				req.Checks[i].RentPayer = rentPayer
+			}
+		}
+	}
 	req.Concurrency = concurrency
 
 	p, cleanup, err := opts.prober()

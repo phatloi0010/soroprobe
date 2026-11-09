@@ -3,16 +3,22 @@ package probe
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/soroworks/soroprobe/internal/health"
 	"github.com/soroworks/soroprobe/internal/scval"
+	"github.com/soroworks/soroprobe/internal/stellar"
 )
+
+// baseReserveStroops is the Stellar network base reserve (0.5 XLM = 5,000,000 stroops).
+const baseReserveStroops int64 = 5_000_000
 
 // CheckRequest describes a combined health check.
 type CheckRequest struct {
@@ -34,6 +40,24 @@ type CheckRequest struct {
 	DataKeys []string `json:"data_keys,omitempty" yaml:"data_keys,omitempty"`
 	// DataDurability selects the durability DataKeys are read at.
 	DataDurability health.Durability `json:"data_durability,omitempty" yaml:"data_durability,omitempty"`
+	// RentPayer, when set, names a Stellar account ("G...") whose spendable
+	// XLM balance is compared against the estimated rent for expiring entries.
+	RentPayer string `json:"rent_payer,omitempty" yaml:"rent_payer,omitempty"`
+}
+
+// RentPayerReport shows the spendable-balance vs. extension-fee calculation.
+type RentPayerReport struct {
+	AccountID          string `json:"account_id"`
+	Exists             bool   `json:"exists"`
+	BalanceStroops     int64  `json:"balance_stroops"`
+	ReserveStroops     int64  `json:"reserve_stroops"`
+	SpendableStroops   int64  `json:"spendable_stroops"`
+	ExpiringEntries    int    `json:"expiring_entries"`
+	EstimatedRent      int64  `json:"estimated_rent_stroops"`
+	NumSubEntries      uint32 `json:"num_sub_entries"`
+	NumSponsoring      uint32 `json:"num_sponsoring,omitempty"`
+	NumSponsored       uint32 `json:"num_sponsored,omitempty"`
+	SellingLiabilities int64  `json:"selling_liabilities_stroops,omitempty"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -70,6 +94,8 @@ type CheckResult struct {
 	Inspect *InspectResult `json:"inspect,omitempty"`
 	// Simulate is the invocation result, when a function was given.
 	Simulate *SimulateResult `json:"simulate,omitempty"`
+	// RentPayer is the rent-payer affordability calculation, when requested.
+	RentPayer *RentPayerReport `json:"rent_payer,omitempty"`
 	// LatestLedger is the ledger the assessment was made against.
 	LatestLedger uint32 `json:"latest_ledger"`
 	// CloseTimeNote explains the measured duration estimate or its fallback.
@@ -177,6 +203,15 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 			}
 			return nil, err
 		}
+	}
+
+	if inspect.Deployed && req.RentPayer != "" {
+		rpCheck, rpReport, err := p.evaluateRentPayer(ctx, req, inspect)
+		if err != nil {
+			return nil, err
+		}
+		result.RentPayer = rpReport
+		result.Checks = append(result.Checks, rpCheck)
 	}
 
 	result.OK = true
@@ -399,4 +434,147 @@ func formatVal(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+func needsExtension(entry EntryReport) bool {
+	if !entry.Present || entry.LiveUntilLedger == nil {
+		return false
+	}
+	return entry.Status == health.StatusWarning || entry.Status == health.StatusCritical
+}
+
+func (p *Prober) evaluateRentPayer(ctx context.Context, req CheckRequest, inspect *InspectResult) (Check, *RentPayerReport, error) {
+	acctKey, err := stellar.AccountKey(req.RentPayer)
+	if err != nil {
+		return Check{}, nil, err
+	}
+	encodedAcctKey, err := stellar.EncodeKey(acctKey)
+	if err != nil {
+		return Check{}, nil, err
+	}
+
+	contract, err := stellar.ParseContractID(req.ContractID)
+	if err != nil {
+		return Check{}, nil, err
+	}
+
+	var expiringEntries int
+	var estimatedRent int64
+
+	addRent := func(key xdr.LedgerKey, entry EntryReport) error {
+		if !needsExtension(entry) {
+			return nil
+		}
+		extendTo := inspect.LatestLedger + entry.Thresholds.Warn
+		if entry.LiveUntilLedger != nil && *entry.LiveUntilLedger >= extendTo {
+			extendTo = *entry.LiveUntilLedger + entry.Thresholds.Warn
+		}
+		fee, _, err := p.estimateExtendFee(ctx, key, extendTo)
+		if err != nil {
+			return err
+		}
+		expiringEntries++
+		estimatedRent += fee
+		return nil
+	}
+
+	if err := addRent(stellar.InstanceKey(contract), inspect.Instance); err != nil {
+		return Check{}, nil, err
+	}
+	if inspect.Code != nil && inspect.WasmHash != "" {
+		rawHash, err := hex.DecodeString(inspect.WasmHash)
+		if err == nil && len(rawHash) == len(xdr.Hash{}) {
+			var hash xdr.Hash
+			copy(hash[:], rawHash)
+			if err := addRent(stellar.CodeKey(hash), *inspect.Code); err != nil {
+				return Check{}, nil, err
+			}
+		}
+	}
+	durability := req.DataDurability
+	if durability == "" {
+		durability = health.DurabilityPersistent
+	}
+	dataKeys, err := p.encodeDataKeys(contract, req.DataKeys, durability)
+	if err != nil {
+		return Check{}, nil, err
+	}
+	for i, dk := range dataKeys {
+		if i >= len(inspect.Data) {
+			break
+		}
+		if err := addRent(dk.key, inspect.Data[i]); err != nil {
+			return Check{}, nil, err
+		}
+	}
+
+	resp, err := p.client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: []string{encodedAcctKey}})
+	if err != nil {
+		return Check{}, nil, err
+	}
+
+	report := &RentPayerReport{
+		AccountID:       req.RentPayer,
+		ExpiringEntries: expiringEntries,
+		EstimatedRent:   estimatedRent,
+	}
+	if len(resp.Entries) == 0 {
+		return Check{
+			Name:    "rent_payer",
+			Outcome: OutcomeFail,
+			Detail:  fmt.Sprintf("rent payer account %s not found on ledger (estimated rent %d stroops for %d expiring entries)", req.RentPayer, estimatedRent, expiringEntries),
+		}, report, nil
+	}
+
+	data, err := stellar.DecodeEntryData(resp.Entries[0].DataXDR)
+	if err != nil {
+		return Check{}, nil, err
+	}
+	if data.Account == nil {
+		return Check{}, nil, fmt.Errorf("ledger entry for %s is not an account (got %s)", req.RentPayer, data.Type)
+	}
+	acc := data.Account
+
+	numSub := uint32(acc.NumSubEntries)
+	numSponsoring := uint32(acc.NumSponsoring())
+	numSponsored := uint32(acc.NumSponsored())
+	selling := int64(acc.Liabilities().Selling)
+
+	reserveUnits := int64(2) + int64(numSub) + int64(numSponsoring) - int64(numSponsored)
+	if reserveUnits < 0 {
+		reserveUnits = 0
+	}
+	reserve := reserveUnits*baseReserveStroops + selling
+	balance := int64(acc.Balance)
+	spendable := balance - reserve
+	if spendable < 0 {
+		spendable = 0
+	}
+
+	report.Exists = true
+	report.BalanceStroops = balance
+	report.ReserveStroops = reserve
+	report.SpendableStroops = spendable
+	report.NumSubEntries = numSub
+	report.NumSponsoring = numSponsoring
+	report.NumSponsored = numSponsored
+	report.SellingLiabilities = selling
+
+	outcome := OutcomePass
+	switch {
+	case balance < reserve || spendable < estimatedRent:
+		outcome = OutcomeFail
+	case (estimatedRent > 0 && spendable < 2*estimatedRent) || (estimatedRent == 0 && spendable == 0):
+		outcome = OutcomeWarn
+	}
+
+	detail := fmt.Sprintf(
+		"account %s: balance %d - reserve %d (%d base reserves) = %d spendable stroops; estimated rent %d stroops for %d expiring entries",
+		req.RentPayer, balance, reserve, reserveUnits, spendable, estimatedRent, expiringEntries,
+	)
+	return Check{
+		Name:    "rent_payer",
+		Outcome: outcome,
+		Detail:  detail,
+	}, report, nil
 }

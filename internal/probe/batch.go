@@ -196,6 +196,22 @@ func (p *Prober) checkBatchPrefetched(ctx context.Context, req BatchRequest) (*B
 				initialKeys = append(initialKeys, key)
 			}
 		}
+		if check.RentPayer != "" {
+			acctKey, err := stellar.AccountKey(check.RentPayer)
+			if err != nil {
+				states[i].err = err
+				continue
+			}
+			encodedAcctKey, err := stellar.EncodeKey(acctKey)
+			if err != nil {
+				states[i].err = err
+				continue
+			}
+			if _, ok := seen[encodedAcctKey]; !ok {
+				seen[encodedAcctKey] = struct{}{}
+				initialKeys = append(initialKeys, encodedAcctKey)
+			}
+		}
 	}
 
 	initial := p.fetchBatchEntries(ctx, initialKeys)

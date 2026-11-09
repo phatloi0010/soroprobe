@@ -290,6 +290,36 @@ func (f *Fake) SetTTL(t testing.TB, key string, liveUntil uint32) {
 	f.Entries[key] = entry
 }
 
+// SetAccount stores an AccountEntry in the fake's ledger under accountID.
+func (f *Fake) SetAccount(t testing.TB, accountID string, balanceStroops int64, numSubEntries uint32) {
+	t.Helper()
+	lk, err := stellar.AccountKey(accountID)
+	if err != nil {
+		t.Fatalf("account key: %v", err)
+	}
+	keyXDR, err := stellar.EncodeKey(lk)
+	if err != nil {
+		t.Fatalf("encode account key: %v", err)
+	}
+	data := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.AccountEntry{
+			AccountId:     lk.Account.AccountId,
+			Balance:       xdr.Int64(balanceStroops),
+			NumSubEntries: xdr.Uint32(numSubEntries),
+			Thresholds:    xdr.Thresholds{1, 0, 0, 0},
+		},
+	}
+	dataXDR, err := xdr.MarshalBase64(data)
+	if err != nil {
+		t.Fatalf("encode account data: %v", err)
+	}
+	f.Entries[keyXDR] = protocol.LedgerEntryResult{
+		KeyXDR:  keyXDR,
+		DataXDR: dataXDR,
+	}
+}
+
 // InstanceKeyOf returns the base64 instance ledger key for a contract, which is
 // how tests address entries in the fake.
 func InstanceKeyOf(t testing.TB, contractID string) string {

@@ -25,6 +25,29 @@ func ParseContractID(contractID string) (xdr.ScAddress, error) {
 	}, nil
 }
 
+// AccountKey returns the LedgerKey for a Stellar account ("G...").
+func AccountKey(accountID string) (xdr.LedgerKey, error) {
+	raw, err := strkey.Decode(strkey.VersionByteAccountID, accountID)
+	if err != nil {
+		return xdr.LedgerKey{}, fmt.Errorf("invalid account id %q: %w", accountID, err)
+	}
+	if len(raw) != 32 {
+		return xdr.LedgerKey{}, fmt.Errorf("invalid account id %q: expected 32 bytes, got %d", accountID, len(raw))
+	}
+
+	var key xdr.Uint256
+	copy(key[:], raw)
+	return xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{
+			AccountId: xdr.AccountId{
+				Type:    xdr.PublicKeyTypePublicKeyTypeEd25519,
+				Ed25519: &key,
+			},
+		},
+	}, nil
+}
+
 // InstanceKey returns the LedgerKey for a contract's instance entry.
 //
 // The instance is a ContractData entry with the special
