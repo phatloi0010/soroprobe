@@ -460,6 +460,29 @@ func TestCheckEndpointPassesArgs(t *testing.T) {
 	assert.Len(t, args, 2)
 }
 
+func TestCheckEndpointStrictParam(t *testing.T) {
+	t.Parallel()
+
+	fake := stellartest.NewFake(t)
+	instanceKey := stellartest.InstanceKeyOf(t, stellartest.SACContract)
+	fake.SetTTL(t, instanceKey, fake.LatestLedger+50_000)
+	h := newServer(t, fake)
+
+	var nonStrict probe.CheckResult
+	rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract, "", &nonStrict)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, nonStrict.OK)
+
+	var strict probe.CheckResult
+	rec = do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?strict=true", "", &strict)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, strict.OK)
+	assert.Equal(t, probe.OutcomeWarn, strict.Checks[1].Outcome)
+
+	rec = do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?strict=notabool", "", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestNoWriteRoutesExist(t *testing.T) {
 	t.Parallel()
 

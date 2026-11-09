@@ -395,6 +395,7 @@ Combined health check, designed for CI.
 | `--key <spec>` | A contract data key to include in the TTL check. Repeatable. |
 | `--key-file <path>` | A file listing data keys, one spec per line. Combined with `--key`. |
 | `--durability <d>` | Durability for `--key` lookups. |
+| `--strict` | Fail the check when any step reports a TTL warning (`warn`). |
 | `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
 
 Checks run in order: `deployed`, `instance_ttl`, `code_ttl`, any `data_ttl`, then
@@ -468,8 +469,13 @@ outlives it is reported as one that could not run, and the batch continues.
 
 With `--check-timeout 30s`, `token` is still bounded at 10s and `vault` at 30s.
 
-A **TTL warning does not fail the check.** It is a signal to extend the entry,
-not a reason to break a build. Only `critical`, `expired` and `missing` fail.
+A **TTL warning does not fail the check by default.** It is a signal to extend
+the entry, not a reason to break every build; only `critical`, `expired` and
+`missing` fail. When a release gate should refuse to ship while any entry is
+inside the warning window, pass `--strict` (or set `"strict": true` on an entry
+in `check --file`, or `?strict=true` on `GET /v1/check/{contract}`). Strict mode
+makes `ok` false (exit 1) when any step is `warn`, while keeping the step's own
+outcome as `warn` so a reader can still tell a warning from a critical failure.
 
 `--fn` is optional by design. SoroProbe cannot discover a contract's exported
 functions from the ledger, and guessing a name would produce a failure that
@@ -735,7 +741,7 @@ many ledgers, exactly as `inspect --estimate-extend` does.
 
 ### `GET /v1/check/{contract}`
 
-Query parameters: `fn`, `arg` (repeatable), `key` (repeatable), `durability`.
+Query parameters: `fn`, `arg` (repeatable), `key` (repeatable), `durability`, `strict`.
 
 ### `POST /v1/checks`
 

@@ -587,6 +587,23 @@ func TestCheckRunsEndToEndAgainstTheFake(t *testing.T) {
 		assert.False(t, errors.As(err, &failed))
 		assert.Contains(t, err.Error(), "invalid contract id")
 	})
+
+	t.Run("strict makes a TTL warning exit 1 while keeping WARN in output", func(t *testing.T) {
+		warnFake := stellartest.NewFake(t)
+		instanceKey := stellartest.InstanceKeyOf(t, stellartest.SACContract)
+		warnFake.SetTTL(t, instanceKey, warnFake.LatestLedger+50_000)
+
+		out, err := runWithFake(t, warnFake, "check", stellartest.SACContract)
+		require.NoError(t, err, "default behavior passes on TTL warning")
+		assert.Contains(t, out, "WARN")
+		assert.Contains(t, out, "result PASS")
+
+		out, err = runWithFake(t, warnFake, "check", "--strict", stellartest.SACContract)
+		require.Error(t, err)
+		assertExitCodeOne(t, err)
+		assert.Contains(t, out, "WARN")
+		assert.Contains(t, out, "result FAIL")
+	})
 }
 
 func TestCheckFileRunsEndToEndAgainstTheFake(t *testing.T) {
@@ -672,5 +689,20 @@ func TestCheckFileRunsEndToEndAgainstTheFake(t *testing.T) {
 		_, err := runWithFake(t, fake, "check", "--file", malformed)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "read check file")
+	})
+
+	t.Run("strict in batch entry fails on TTL warning", func(t *testing.T) {
+		warnFake := stellartest.NewFake(t)
+		instanceKey := stellartest.InstanceKeyOf(t, stellartest.SACContract)
+		warnFake.SetTTL(t, instanceKey, warnFake.LatestLedger+50_000)
+
+		strictBatch := writeTempFile(t, "strict.json", `{"checks": [
+			{"name": "token", "contract_id": "`+stellartest.SACContract+`", "strict": true}
+		]}`)
+
+		out, err := runWithFake(t, warnFake, "check", "--file", strictBatch)
+		require.Error(t, err)
+		assertExitCodeOne(t, err)
+		assert.Contains(t, out, "0 passed, 1 failed")
 	})
 }

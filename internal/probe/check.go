@@ -34,6 +34,9 @@ type CheckRequest struct {
 	DataKeys []string `json:"data_keys,omitempty" yaml:"data_keys,omitempty"`
 	// DataDurability selects the durability DataKeys are read at.
 	DataDurability health.Durability `json:"data_durability,omitempty" yaml:"data_durability,omitempty"`
+	// Strict, when true, makes any warning outcome (such as a TTL warning)
+	// fail the overall check. The individual step outcome stays OutcomeWarn.
+	Strict bool `json:"strict,omitempty" yaml:"strict,omitempty"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -181,7 +184,7 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 
 	result.OK = true
 	for _, c := range result.Checks {
-		if c.Outcome == OutcomeFail {
+		if c.Outcome == OutcomeFail || (req.Strict && c.Outcome == OutcomeWarn) {
 			result.OK = false
 			break
 		}

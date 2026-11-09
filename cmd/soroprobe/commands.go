@@ -373,6 +373,7 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var strict bool
 
 	cmd := &cobra.Command{
 		Use:   "check <contract-id> | check --file <checks.json>",
@@ -382,8 +383,10 @@ its instance and code entries are live and not near expiration, and optionally
 that a read-only call simulates successfully.
 
 Exits 0 when every check passes, 1 when any check fails, and 2 when SoroProbe
-itself could not run. A TTL warning does not fail the check; it is a signal to
-extend the entry, not a reason to break a pipeline.
+itself could not run. A TTL warning does not fail the check by default; it is a
+signal to extend the entry, not a reason to break a pipeline. Pass --strict (or
+set "strict": true on a batch entry) when a release gate must refuse to ship
+with any TTL warning.
 
 --fn is optional. SoroProbe cannot discover a contract's exported functions, and
 guessing one would produce a misleading failure, so the simulation step is
@@ -448,7 +451,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			defer func() { err = errors.Join(err, report.close()) }()
 
 			if file != "" {
-				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat)
+				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, strict, report, quiet, outputFormat)
 			}
 
 			d, err := parseDurability(durability)
@@ -474,6 +477,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
+				Strict:         strict,
 			})
 			if err != nil {
 				return err
@@ -509,6 +513,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "maximum number of --file checks to run at once")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "treat TTL warnings as check failures")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
 	return cmd
 }
@@ -526,12 +531,13 @@ func selectOutputFormat(cmd *cobra.Command, opts *options, format string) (strin
 }
 
 // runCheckFile runs a batch of checks read from path.
-func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool, format string) error {
+func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, strict bool, report *reportFile, quiet bool, format string) error {
 	req, err := readBatch(cmd.InOrStdin(), path)
 	if err != nil {
 		return err
 	}
 	applyDefaultTimeout(&req, checkTimeout)
+	applyDefaultStrict(&req, strict)
 	req.Concurrency = concurrency
 
 	p, cleanup, err := opts.prober()
@@ -634,6 +640,15 @@ func applyDefaultTimeout(req *probe.BatchRequest, d time.Duration) {
 		if req.Checks[i].Timeout == "" {
 			req.Checks[i].Timeout = d.String()
 		}
+	}
+}
+
+func applyDefaultStrict(req *probe.BatchRequest, strict bool) {
+	if !strict {
+		return
+	}
+	for i := range req.Checks {
+		req.Checks[i].Strict = true
 	}
 }
 

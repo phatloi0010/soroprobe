@@ -629,6 +629,7 @@ func TestCheckTTLOutcomes(t *testing.T) {
 	tests := []struct {
 		name      string
 		liveUntil func(current uint32) uint32
+		strict    bool
 		want      probe.CheckOutcome
 		wantOK    bool
 	}{
@@ -644,6 +645,22 @@ func TestCheckTTLOutcomes(t *testing.T) {
 			name:      "warning warns but does not fail",
 			liveUntil: func(c uint32) uint32 { return c + 50_000 },
 			want:      probe.OutcomeWarn,
+			wantOK:    true,
+		},
+		{
+			// Strict mode turns a warning into an overall check failure while
+			// keeping the step outcome as warn.
+			name:      "warning fails when strict is set",
+			liveUntil: func(c uint32) uint32 { return c + 50_000 },
+			strict:    true,
+			want:      probe.OutcomeWarn,
+			wantOK:    false,
+		},
+		{
+			name:      "healthy still passes when strict is set",
+			liveUntil: func(c uint32) uint32 { return c + 1_000_000 },
+			strict:    true,
+			want:      probe.OutcomePass,
 			wantOK:    true,
 		},
 		{
@@ -670,6 +687,7 @@ func TestCheckTTLOutcomes(t *testing.T) {
 
 			result, err := p.Check(context.Background(), probe.CheckRequest{
 				ContractID: stellartest.SACContract,
+				Strict:     tt.strict,
 			})
 			require.NoError(t, err)
 

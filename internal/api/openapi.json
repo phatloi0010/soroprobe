@@ -286,6 +286,15 @@
               "type": "string",
               "enum": ["persistent", "temporary", "temp"]
             }
+          },
+          {
+            "name": "strict",
+            "in": "query",
+            "required": false,
+            "description": "Treat TTL warnings as check failures",
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -769,6 +778,9 @@
           "data_durability": {
             "type": "string",
             "enum": ["persistent", "temporary"]
+          },
+          "strict": {
+            "type": "boolean"
           }
         },
         "required": ["contract_id"]

@@ -201,6 +201,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	strict, err := strictParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
 	query := r.URL.Query()
 	result, err := s.prober.Check(r.Context(), probe.CheckRequest{
 		ContractID:     chi.URLParam(r, "contract"),
@@ -209,6 +215,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		Expect:         query.Get("expect"),
 		DataKeys:       query["key"],
 		DataDurability: durability,
+		Strict:         strict,
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err)
@@ -219,6 +226,18 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	// body is returned with 200 and callers read "ok". Returning 5xx here would
 	// conflate an unhealthy contract with a broken service.
 	writeJSON(w, http.StatusOK, result)
+}
+
+func strictParam(r *http.Request) (bool, error) {
+	raw := r.URL.Query().Get("strict")
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("strict must be a boolean, got %q", raw)
+	}
+	return v, nil
 }
 
 func durabilityParam(r *http.Request) (health.Durability, error) {
