@@ -436,7 +436,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			if err := checkQuietConflicts(quiet, opts.jsonOut, reportPath); err != nil {
 				return err
 			}
-			outputFormat, err := selectOutputFormat(cmd, opts, format)
+			outputFormat, err := selectCheckOutputFormat(cmd, opts, format, file != "")
 			if err != nil {
 				return err
 			}
@@ -505,7 +505,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().StringVarP(&file, "file", "f", "", `run every check listed in this JSON file ("-" for stdin)`)
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 0,
 		`default time limit for each check in --file; a per-entry "timeout" wins (0 means no limit)`)
-	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json or markdown")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json, markdown or junit (with --file)")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "maximum number of --file checks to run at once")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
@@ -522,6 +522,23 @@ func selectOutputFormat(cmd *cobra.Command, opts *options, format string) (strin
 		return format, nil
 	default:
 		return "", fmt.Errorf("unsupported output format %q (want text, json or markdown)", format)
+	}
+}
+
+func selectCheckOutputFormat(cmd *cobra.Command, opts *options, format string, hasFile bool) (string, error) {
+	if opts.jsonOut && !cmd.Flags().Changed("format") {
+		return "json", nil
+	}
+	switch format {
+	case "text", "json", "markdown":
+		return format, nil
+	case "junit":
+		if !hasFile {
+			return "", fmt.Errorf("--format junit requires --file")
+		}
+		return format, nil
+	default:
+		return "", fmt.Errorf("unsupported output format %q (want text, json, markdown or junit)", format)
 	}
 }
 
@@ -558,6 +575,8 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 			err = writeJSON(out, result)
 		case "markdown":
 			err = renderMarkdownBatch(out, result)
+		case "junit":
+			err = renderJUnitBatch(out, result)
 		default:
 			err = renderBatch(out, result)
 		}

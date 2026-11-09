@@ -454,6 +454,13 @@ order, and cancellation stops checks waiting to start. One check that cannot run
 is reported and the rest continue. The exit code is 2 if any check could not
 run, else 1 if any failed, else 0.
 
+`--format junit` writes the batch results as JUnit XML (`<testsuite>` with one
+`<testcase classname="soroprobe">` per named check), so CI runners such as
+GitHub Actions test reporters, GitLab, Jenkins and CircleCI can display each
+check natively. Failed checks emit `<failure>` with the first failing step as
+`message` and all steps in the body; checks that could not run emit `<error>`;
+warnings are written to `<system-out>`. Exit codes are unchanged by `--format`.
+
 `timeout` bounds a single check, as a Go duration string (`"45s"`); a check that
 outlives it is reported as one that could not run, and the batch continues.
 `--check-timeout` sets the default for entries that name none — a per-entry

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"os"
 	"strings"
 	"testing"
@@ -418,6 +419,79 @@ func TestRenderBatch(t *testing.T) {
 	assert.Contains(t, out, "FAIL   vault   code_ttl: expired")
 	assert.Contains(t, out, "ERROR  broken  invalid contract id")
 	assert.Contains(t, out, "1 passed, 1 failed, 1 could not run")
+}
+
+func TestRenderJUnitBatch(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := renderJUnitBatch(&buf, &probe.BatchResult{
+		OK:      false,
+		Errored: true,
+		Items: []probe.BatchItem{
+			{
+				Name:       "token",
+				ContractID: "CDLZ<token>",
+				Result: &probe.CheckResult{
+					OK: true,
+					Checks: []probe.Check{
+						{Name: "deployed", Outcome: probe.OutcomePass, Detail: "instance found"},
+						{Name: "instance_ttl", Outcome: probe.OutcomeWarn, Detail: "live for 100 more ledgers & expiring <soon>"},
+					},
+				},
+			},
+			{
+				Name:       "vault",
+				ContractID: "CCLV&vault",
+				Result: &probe.CheckResult{
+					OK: false,
+					Checks: []probe.Check{
+						{Name: "deployed", Outcome: probe.OutcomePass, Detail: "instance found"},
+						{Name: "code_ttl", Outcome: probe.OutcomeFail, Detail: "expired at <ledger> & gone"},
+					},
+				},
+			},
+			{
+				Name:       "broken",
+				ContractID: "CBAD\"quote\"",
+				Error:      "host error: <trap> & \"overflow\"",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	var parsed junitTestSuite
+	require.NoError(t, xml.Unmarshal(buf.Bytes(), &parsed))
+	assert.Equal(t, "soroprobe", parsed.Name)
+	assert.Equal(t, 3, parsed.Tests)
+	assert.Equal(t, 1, parsed.Failures)
+	assert.Equal(t, 1, parsed.Errors)
+	require.Len(t, parsed.TestCases, 3)
+
+	// Passing check with warning: no failure or error, warning in <system-out>.
+	assert.Equal(t, "soroprobe", parsed.TestCases[0].Classname)
+	assert.Equal(t, "token", parsed.TestCases[0].Name)
+	assert.Nil(t, parsed.TestCases[0].Failure)
+	assert.Nil(t, parsed.TestCases[0].Error)
+	assert.Equal(t, "instance_ttl: live for 100 more ledgers & expiring <soon>", parsed.TestCases[0].SystemOut)
+
+	// Failed check: <failure> message is first failing step, body lists every step.
+	assert.Equal(t, "soroprobe", parsed.TestCases[1].Classname)
+	assert.Equal(t, "vault", parsed.TestCases[1].Name)
+	require.NotNil(t, parsed.TestCases[1].Failure)
+	assert.Nil(t, parsed.TestCases[1].Error)
+	assert.Equal(t, "code_ttl: expired at <ledger> & gone", parsed.TestCases[1].Failure.Message)
+	assert.Contains(t, parsed.TestCases[1].Failure.Body, "contract CCLV&vault")
+	assert.Contains(t, parsed.TestCases[1].Failure.Body, "PASS deployed: instance found")
+	assert.Contains(t, parsed.TestCases[1].Failure.Body, "FAIL code_ttl: expired at <ledger> & gone")
+
+	// Check that could not run: <error>, not <failure>.
+	assert.Equal(t, "soroprobe", parsed.TestCases[2].Classname)
+	assert.Equal(t, "broken", parsed.TestCases[2].Name)
+	assert.Nil(t, parsed.TestCases[2].Failure)
+	require.NotNil(t, parsed.TestCases[2].Error)
+	assert.Equal(t, "host error: <trap> & \"overflow\"", parsed.TestCases[2].Error.Message)
+	assert.Contains(t, parsed.TestCases[2].Error.Body, "CBAD\"quote\"")
 }
 
 func TestRenderMarkdownCheckGolden(t *testing.T) {

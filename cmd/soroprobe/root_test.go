@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
@@ -672,5 +673,32 @@ func TestCheckFileRunsEndToEndAgainstTheFake(t *testing.T) {
 		_, err := runWithFake(t, fake, "check", "--file", malformed)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "read check file")
+	})
+
+	t.Run("junit format writes XML and preserves exit codes", func(t *testing.T) {
+		out, err := runWithFake(t, fake, "check", "--file", passing, "--format", "junit")
+		require.NoError(t, err)
+		var suite junitTestSuite
+		require.NoError(t, xml.Unmarshal([]byte(out), &suite))
+		assert.Equal(t, 1, suite.Tests)
+		assert.Equal(t, 0, suite.Failures)
+		assert.Equal(t, 0, suite.Errors)
+
+		out, err = runWithFake(t, fake, "check", "--file", failing, "--format", "junit")
+		require.Error(t, err)
+		assertExitCodeOne(t, err)
+		require.NoError(t, xml.Unmarshal([]byte(out), &suite))
+		assert.Equal(t, 2, suite.Tests)
+		assert.Equal(t, 1, suite.Failures)
+		assert.Equal(t, 0, suite.Errors)
+
+		out, err = runWithFake(t, fake, "check", "--file", broken, "--format", "junit")
+		require.Error(t, err)
+		var failed *checkFailedError
+		assert.False(t, errors.As(err, &failed))
+		require.NoError(t, xml.Unmarshal([]byte(out), &suite))
+		assert.Equal(t, 1, suite.Tests)
+		assert.Equal(t, 0, suite.Failures)
+		assert.Equal(t, 1, suite.Errors)
 	})
 }

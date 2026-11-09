@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -423,6 +424,100 @@ func renderBatch(w io.Writer, r *probe.BatchResult) error {
 
 	bw.printf("\n%s %d passed, %d failed, %d could not run\n", s.bold("result"), passed, failed, errored)
 	return bw.err
+}
+
+type junitTestSuite struct {
+	XMLName   xml.Name        `xml:"testsuite"`
+	Name      string          `xml:"name,attr"`
+	Tests     int             `xml:"tests,attr"`
+	Failures  int             `xml:"failures,attr"`
+	Errors    int             `xml:"errors,attr"`
+	TestCases []junitTestCase `xml:"testcase"`
+}
+
+type junitTestCase struct {
+	XMLName   xml.Name      `xml:"testcase"`
+	Classname string        `xml:"classname,attr"`
+	Name      string        `xml:"name,attr"`
+	Failure   *junitMessage `xml:"failure,omitempty"`
+	Error     *junitMessage `xml:"error,omitempty"`
+	SystemOut string        `xml:"system-out,omitempty"`
+}
+
+type junitMessage struct {
+	Message string `xml:"message,attr"`
+	Body    string `xml:",chardata"`
+}
+
+// renderJUnitBatch writes a JUnit XML testsuite for a batch of checks.
+func renderJUnitBatch(w io.Writer, r *probe.BatchResult) error {
+	suite := junitTestSuite{
+		Name:      "soroprobe",
+		Tests:     len(r.Items),
+		TestCases: make([]junitTestCase, 0, len(r.Items)),
+	}
+
+	for _, item := range r.Items {
+		tc := junitTestCase{
+			Classname: "soroprobe",
+			Name:      item.Name,
+		}
+		switch {
+		case item.Error != "":
+			suite.Errors++
+			body := item.Error
+			if item.ContractID != "" {
+				body = fmt.Sprintf("contract %s\n%s", item.ContractID, item.Error)
+			}
+			tc.Error = &junitMessage{
+				Message: item.Error,
+				Body:    body,
+			}
+		case item.Result != nil:
+			var warnings []string
+			for _, c := range item.Result.Checks {
+				if c.Outcome == probe.OutcomeWarn {
+					warnings = append(warnings, fmt.Sprintf("%s: %s", c.Name, c.Detail))
+				}
+			}
+			if len(warnings) > 0 {
+				tc.SystemOut = strings.Join(warnings, "\n")
+			}
+
+			if !item.Result.OK {
+				suite.Failures++
+				msg := firstNotPassing(item.Result, probe.OutcomeFail)
+				if msg == "" {
+					msg = firstNotPassing(item.Result, probe.OutcomeWarn)
+				}
+				var body strings.Builder
+				if item.ContractID != "" {
+					fmt.Fprintf(&body, "contract %s\n", item.ContractID)
+				}
+				for _, c := range item.Result.Checks {
+					fmt.Fprintf(&body, "%s %s: %s\n", strings.ToUpper(string(c.Outcome)), c.Name, c.Detail)
+				}
+				tc.Failure = &junitMessage{
+					Message: msg,
+					Body:    strings.TrimRight(body.String(), "\n"),
+				}
+			}
+		}
+		suite.TestCases = append(suite.TestCases, tc)
+	}
+
+	raw, err := xml.MarshalIndent(suite, "", "  ")
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, xml.Header); err != nil {
+		return err
+	}
+	if _, err := w.Write(raw); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "\n")
+	return err
 }
 
 func renderMarkdownCheck(w io.Writer, r *probe.CheckResult) error {
