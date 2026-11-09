@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/health"
 	"github.com/soroworks/soroprobe/internal/scval"
 )
@@ -34,6 +37,19 @@ type CheckRequest struct {
 	DataKeys []string `json:"data_keys,omitempty" yaml:"data_keys,omitempty"`
 	// DataDurability selects the durability DataKeys are read at.
 	DataDurability health.Durability `json:"data_durability,omitempty" yaml:"data_durability,omitempty"`
+	// Upgradeability, when true, produces a best-effort upgradeability report.
+	Upgradeability bool `json:"upgradeability,omitempty" yaml:"upgradeability,omitempty"`
+}
+
+// UpgradeabilityReport summarizes whether a contract appears upgradeable.
+type UpgradeabilityReport struct {
+	Upgradeable            bool     `json:"upgradeable"`
+	Functions              []string `json:"functions,omitempty"`
+	Admin                  string   `json:"admin,omitempty"`
+	AdminSource            string   `json:"admin_source,omitempty"`
+	CodeLastModifiedLedger uint32   `json:"code_last_modified_ledger,omitempty"`
+	InstanceModifiedLedger uint32   `json:"instance_last_modified_ledger,omitempty"`
+	HeuristicNote          string   `json:"heuristic_note"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -70,6 +86,8 @@ type CheckResult struct {
 	Inspect *InspectResult `json:"inspect,omitempty"`
 	// Simulate is the invocation result, when a function was given.
 	Simulate *SimulateResult `json:"simulate,omitempty"`
+	// Upgradeability is the best-effort upgradeability report, when requested.
+	Upgradeability *UpgradeabilityReport `json:"upgradeability,omitempty"`
 	// LatestLedger is the ledger the assessment was made against.
 	LatestLedger uint32 `json:"latest_ledger"`
 	// CloseTimeNote explains the measured duration estimate or its fallback.
@@ -177,6 +195,15 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 			}
 			return nil, err
 		}
+	}
+
+	if inspect.Deployed && req.Upgradeability {
+		upCheck, upReport, err := p.evaluateUpgradeability(ctx, req, inspect)
+		if err != nil {
+			return nil, err
+		}
+		result.Upgradeability = upReport
+		result.Checks = append(result.Checks, upCheck)
 	}
 
 	result.OK = true
@@ -399,4 +426,104 @@ func formatVal(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+func (p *Prober) evaluateUpgradeability(ctx context.Context, req CheckRequest, inspect *InspectResult) (Check, *UpgradeabilityReport, error) {
+	report := &UpgradeabilityReport{
+		InstanceModifiedLedger: inspect.Instance.LastModifiedLedger,
+		HeuristicNote:          "best-effort heuristic: upgradeability is inferred from exported function signatures and storage metadata",
+	}
+	if inspect.Code != nil {
+		report.CodeLastModifiedLedger = inspect.Code.LastModifiedLedger
+	}
+
+	if inspect.Executable == "stellar_asset" {
+		report.HeuristicNote = "best-effort heuristic: Stellar Asset Contracts are built into the host and have no Wasm code entry to upgrade"
+		return Check{
+			Name:    "upgradeability",
+			Outcome: OutcomePass,
+			Detail:  "not upgradeable (Stellar Asset Contract built into host; best-effort heuristic)",
+		}, report, nil
+	}
+
+	var iface *abi.Interface
+	var err error
+	if p.abi != nil {
+		iface, err = p.abi.Interface(ctx, p.network, req.ContractID)
+		if errors.Is(err, abi.ErrUnknownContract) {
+			iface = nil
+			err = nil
+		}
+	}
+	if iface == nil && err == nil {
+		iface, err = abi.NewChainSource(p.client).Interface(ctx, p.network, req.ContractID)
+	}
+
+	if iface != nil {
+		for _, fn := range iface.UpgradeFunctions() {
+			report.Functions = append(report.Functions, fn.Signature())
+		}
+		report.Upgradeable = len(report.Functions) > 0
+	}
+
+	admin, adminSrc := p.inferUpgradeAdmin(ctx, req.ContractID, inspect, iface)
+	report.Admin = admin
+	report.AdminSource = adminSrc
+
+	var detail strings.Builder
+	if report.Upgradeable {
+		detail.WriteString(fmt.Sprintf("upgradeable via %s", strings.Join(report.Functions, "; ")))
+	} else {
+		detail.WriteString("no upgrade-like function detected")
+	}
+	if report.Admin != "" {
+		detail.WriteString(fmt.Sprintf(", admin: %s (%s)", report.Admin, report.AdminSource))
+	}
+	if report.CodeLastModifiedLedger > 0 {
+		detail.WriteString(fmt.Sprintf(", code last modified at ledger %d", report.CodeLastModifiedLedger))
+	}
+	detail.WriteString(" (best-effort heuristic)")
+
+	return Check{
+		Name:    "upgradeability",
+		Outcome: OutcomePass,
+		Detail:  detail.String(),
+	}, report, nil
+}
+
+func (p *Prober) inferUpgradeAdmin(ctx context.Context, contractID string, inspect *InspectResult, iface *abi.Interface) (string, string) {
+	if m, ok := inspect.InstanceStorage.(map[string]any); ok {
+		for _, key := range []string{"Admin", "admin", "Owner", "owner"} {
+			if raw, exists := m[key]; exists {
+				if s, ok := raw.(string); ok && (strings.HasPrefix(s, "G") || strings.HasPrefix(s, "C")) {
+					return s, "instance_storage:" + key
+				}
+			}
+		}
+		var keys []string
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if s, ok := m[k].(string); ok && (strings.HasPrefix(s, "G") || strings.HasPrefix(s, "C")) {
+				return s, "instance_storage:" + k
+			}
+		}
+	}
+
+	if iface != nil {
+		for _, fnName := range iface.AdminGetterFunctions() {
+			sim, err := p.Simulate(ctx, SimulateRequest{
+				ContractID: contractID,
+				Function:   fnName,
+			})
+			if err == nil && sim.Success {
+				if s, ok := sim.ReturnValue.(string); ok && (strings.HasPrefix(s, "G") || strings.HasPrefix(s, "C")) {
+					return s, "function:" + fnName
+				}
+			}
+		}
+	}
+	return "", ""
 }

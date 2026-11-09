@@ -66,6 +66,8 @@ type EntryReport struct {
 	Summary string `json:"summary"`
 	// Thresholds are the warning and critical thresholds used for this entry.
 	Thresholds health.Thresholds `json:"thresholds"`
+	// LastModifiedLedger is the ledger sequence when this entry was last modified.
+	LastModifiedLedger uint32 `json:"last_modified_ledger,omitempty"`
 }
 
 // InspectResult reports a contract's on-ledger state health.
@@ -172,9 +174,10 @@ func (p *Prober) inspectUncached(ctx context.Context, req InspectRequest) (*Insp
 	result.Deployed = true
 	instanceThresholds := p.thresholdsFor(health.EntryKindInstance)
 	result.Instance = EntryReport{
-		Kind:       "instance",
-		TTL:        health.EvaluateWithCloseTime(instance.LiveUntilLedgerSeq, resp.LatestLedger, health.DurabilityPersistent, instanceThresholds, closeTime),
-		Thresholds: instanceThresholds,
+		Kind:               "instance",
+		TTL:                health.EvaluateWithCloseTime(instance.LiveUntilLedgerSeq, resp.LatestLedger, health.DurabilityPersistent, instanceThresholds, closeTime),
+		Thresholds:         instanceThresholds,
+		LastModifiedLedger: instance.LastModifiedLedger,
 	}
 	result.Instance.Summary = entrySummary(result.Instance.Describe(), instanceThresholds)
 
@@ -188,6 +191,7 @@ func (p *Prober) inspectUncached(ctx context.Context, req InspectRequest) (*Insp
 		report := EntryReport{Kind: "data", Key: dk.spec, Thresholds: dataThresholds}
 		if entry, ok := found[dk.encoded]; ok {
 			report.TTL = health.EvaluateWithCloseTime(entry.LiveUntilLedgerSeq, resp.LatestLedger, plan.durability, dataThresholds, closeTime)
+			report.LastModifiedLedger = entry.LastModifiedLedger
 		} else {
 			report.TTL = health.Absent(resp.LatestLedger)
 			report.Durability = plan.durability
@@ -419,6 +423,7 @@ func (p *Prober) inspectCode(ctx context.Context, hash xdr.Hash, closeTime time.
 	}
 
 	report.TTL = health.EvaluateWithCloseTime(resp.Entries[0].LiveUntilLedgerSeq, resp.LatestLedger, health.DurabilityPersistent, thresholds, closeTime)
+	report.LastModifiedLedger = resp.Entries[0].LastModifiedLedger
 	report.Summary = entrySummary(report.Describe(), thresholds)
 	return report, nil
 }

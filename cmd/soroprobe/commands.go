@@ -373,6 +373,7 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var upgradeability bool
 
 	cmd := &cobra.Command{
 		Use:   "check <contract-id> | check --file <checks.json>",
@@ -474,6 +475,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
+				Upgradeability: upgradeability,
 			})
 			if err != nil {
 				return err
@@ -510,6 +512,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
+	cmd.Flags().BoolVar(&upgradeability, "upgradeability", false, "include a best-effort upgradeability report")
 	return cmd
 }
 

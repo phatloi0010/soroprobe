@@ -105,6 +105,58 @@ func (f *Function) Signature() string {
 	return b.String()
 }
 
+// UpgradeFunctions returns exported functions that look like contract upgrade
+// entry points based on best-effort name and parameter heuristics.
+func (i *Interface) UpgradeFunctions() []Function {
+	if i == nil {
+		return nil
+	}
+	var out []Function
+	for _, fn := range i.Functions {
+		if isUpgradeFunction(fn) {
+			out = append(out, fn)
+		}
+	}
+	return out
+}
+
+func isUpgradeFunction(fn Function) bool {
+	lower := strings.ToLower(fn.Name)
+	for _, kw := range []string{"upgrade", "update_wasm", "set_wasm", "update_code", "update_contract"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	for _, in := range fn.Inputs {
+		pName := strings.ToLower(in.Name)
+		if (strings.Contains(pName, "wasm") || strings.Contains(pName, "hash")) &&
+			(in.Type.Kind == "bytes_n" || in.Type.Kind == "bytes") {
+			return true
+		}
+	}
+	return false
+}
+
+// AdminGetterFunctions returns candidate zero-argument functions that appear
+// to return an admin or owner address.
+func (i *Interface) AdminGetterFunctions() []string {
+	if i == nil {
+		return nil
+	}
+	var out []string
+	for _, fn := range i.Functions {
+		if len(fn.Inputs) != 0 {
+			continue
+		}
+		lower := strings.ToLower(fn.Name)
+		switch lower {
+		case "admin", "get_admin", "owner", "get_owner":
+			out = append(out, fn.Name)
+		}
+	}
+	return out
+}
+
 // Source supplies contract interfaces.
 type Source interface {
 	// Interface returns the current interface of contractID on the given

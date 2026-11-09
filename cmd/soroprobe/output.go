@@ -436,6 +436,14 @@ func renderMarkdownCheck(w io.Writer, r *probe.CheckResult) error {
 	for _, check := range r.Checks {
 		bw.printf("| %s | %s | %s |\n", markdownCell(check.Name), strings.ToUpper(fmt.Sprint(check.Outcome)), markdownCell(check.Detail))
 	}
+	if r.Upgradeability != nil {
+		bw.printf("\n**Upgradeability (best-effort):** upgradeable=%t, code_last_modified_ledger=%d",
+			r.Upgradeability.Upgradeable, r.Upgradeability.CodeLastModifiedLedger)
+		if r.Upgradeability.Admin != "" {
+			bw.printf(", admin=%s (%s)", markdownCell(r.Upgradeability.Admin), markdownCell(r.Upgradeability.AdminSource))
+		}
+		bw.printf("\n")
+	}
 	return bw.err
 }
 
