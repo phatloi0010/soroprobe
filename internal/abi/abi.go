@@ -11,6 +11,7 @@ package abi
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,11 +36,31 @@ var ErrNoSuchFunction = errors.New("abi: contract does not export that function"
 // function declares.
 var ErrArgumentCount = errors.New("abi: wrong number of arguments")
 
+// ErrBytesNLength reports a BytesN<N> argument whose decoded byte length does
+// not match N.
+var ErrBytesNLength = errors.New("abi: wrong BytesN length")
+
+type bytesNLengthError struct {
+	display string
+	want    uint32
+	got     int
+}
+
+func (e *bytesNLengthError) Error() string {
+	return fmt.Sprintf("%s needs %d bytes, got %d", e.display, e.want, e.got)
+}
+
+func (e *bytesNLengthError) Unwrap() error {
+	return ErrBytesNLength
+}
+
 // Type is a value type in a contract interface. It mirrors the subset of
 // SoroVault's ABI JSON that argument typing needs.
 type Type struct {
 	Kind    string `json:"kind"`
 	Display string `json:"display"`
+	// N is the fixed byte length of a bytes_n type.
+	N uint32 `json:"n,omitempty"`
 	// Inner is the wrapped type of an option.
 	Inner *Type `json:"inner,omitempty"`
 	// Element is the item type of a vec.
@@ -171,6 +192,11 @@ type annotator struct {
 // spec types one literal as t. A literal that already names its type, or
 // whose declared type has no literal form, is returned unchanged.
 func (a annotator) spec(t Type, literal string) (string, error) {
+	if t.Kind == "bytes_n" {
+		if err := checkBytesN(t, literal, a.hasType); err != nil {
+			return "", err
+		}
+	}
 	if a.hasType(literal) {
 		return literal, nil
 	}
@@ -203,6 +229,43 @@ func (a annotator) spec(t Type, literal string) (string, error) {
 		return p + ":" + literal, nil
 	}
 	return literal, nil
+}
+
+func checkBytesN(t Type, literal string, hasType func(string) bool) error {
+	if t.N == 0 {
+		return nil
+	}
+	s := strings.TrimSpace(literal)
+	if hasType != nil && hasType(s) {
+		if len(s) >= 6 && strings.EqualFold(s[:6], "bytes:") {
+			s = strings.TrimSpace(s[6:])
+		} else {
+			return nil
+		}
+	}
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return fmt.Errorf("%w: %s is not valid hex: %w", ErrBytesNLength, bytesNDisplay(t), err)
+	}
+	if len(raw) != int(t.N) {
+		return &bytesNLengthError{
+			display: bytesNDisplay(t),
+			want:    t.N,
+			got:     len(raw),
+		}
+	}
+	return nil
+}
+
+func bytesNDisplay(t Type) string {
+	if t.Display != "" && t.Display != "BytesN" {
+		return t.Display
+	}
+	return fmt.Sprintf("BytesN<%d>", t.N)
 }
 
 // vec types each element of a JSON array literal as the vec's element type

@@ -240,6 +240,7 @@ func statusForError(err error) int {
 	case errors.Is(err, abi.ErrNoSuchFunction),
 		errors.Is(err, probe.ErrInvalidBatch),
 		errors.Is(err, abi.ErrArgumentCount),
+		errors.Is(err, abi.ErrBytesNLength),
 		errors.Is(err, probe.ErrBaselineMismatch):
 		return http.StatusBadRequest
 	case strings.Contains(msg, "invalid contract id"),

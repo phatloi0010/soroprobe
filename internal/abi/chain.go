@@ -197,7 +197,8 @@ func specType(def xdr.ScSpecTypeDef) Type {
 	case xdr.ScSpecTypeScSpecTypeTuple:
 		return Type{Kind: "tuple", Display: "Tuple"}
 	case xdr.ScSpecTypeScSpecTypeBytesN:
-		return Type{Kind: "bytes_n", Display: "BytesN"}
+		n := uint32(def.MustBytesN().N)
+		return Type{Kind: "bytes_n", Display: fmt.Sprintf("BytesN<%d>", n), N: n}
 	case xdr.ScSpecTypeScSpecTypeUdt:
 		name := def.MustUdt().Name
 		return Type{Kind: "udt", Display: name}

@@ -75,6 +75,55 @@ func TestAnnotateRejectsWrongArity(t *testing.T) {
 	assert.Contains(t, err.Error(), "takes 3 argument(s), got 1")
 }
 
+func TestAnnotateBytesNLength(t *testing.T) {
+	t.Parallel()
+	reg := scval.NewRegistry()
+
+	fn := abi.Function{
+		Name: "verify",
+		Inputs: []abi.Param{
+			{Name: "nullifier", Type: abi.Type{Kind: "bytes_n", Display: "BytesN<32>", N: 32}},
+		},
+	}
+
+	const valid32 = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+	t.Run("right length", func(t *testing.T) {
+		t.Parallel()
+		got, err := abi.Annotate(&fn, []string{valid32}, reg.HasType)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"bytes:" + valid32}, got)
+	})
+
+	t.Run("0x-prefixed hex", func(t *testing.T) {
+		t.Parallel()
+		got, err := abi.Annotate(&fn, []string{"0x" + valid32}, reg.HasType)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"bytes:0x" + valid32}, got)
+	})
+
+	t.Run("too short", func(t *testing.T) {
+		t.Parallel()
+		_, err := abi.Annotate(&fn, []string{"deadbeef"}, reg.HasType)
+		require.ErrorIs(t, err, abi.ErrBytesNLength)
+		assert.EqualError(t, err, "argument nullifier: BytesN<32> needs 32 bytes, got 4")
+	})
+
+	t.Run("too long", func(t *testing.T) {
+		t.Parallel()
+		_, err := abi.Annotate(&fn, []string{valid32 + "ff"}, reg.HasType)
+		require.ErrorIs(t, err, abi.ErrBytesNLength)
+		assert.EqualError(t, err, "argument nullifier: BytesN<32> needs 32 bytes, got 33")
+	})
+
+	t.Run("explicit bytes prefix too short", func(t *testing.T) {
+		t.Parallel()
+		_, err := abi.Annotate(&fn, []string{"bytes:deadbeef"}, reg.HasType)
+		require.ErrorIs(t, err, abi.ErrBytesNLength)
+		assert.EqualError(t, err, "argument nullifier: BytesN<32> needs 32 bytes, got 4")
+	})
+}
+
 func TestAnnotatePassesThroughUnsupportedKinds(t *testing.T) {
 	t.Parallel()
 	fn := abi.Function{Name: "f", Inputs: []abi.Param{{Name: "v", Type: scalar("vec", "Vec<u32>")}}}
