@@ -15,9 +15,11 @@ import (
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/api"
 	"github.com/soroworks/soroprobe/internal/config"
 	"github.com/soroworks/soroprobe/internal/health"
+	"github.com/soroworks/soroprobe/internal/integration"
 	"github.com/soroworks/soroprobe/internal/probe"
 )
 
@@ -373,9 +375,12 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var fromSoroForge string
+	var soroForgeToken string
+	var networkName string
 
 	cmd := &cobra.Command{
-		Use:   "check <contract-id> | check --file <checks.json>",
+		Use:   "check <contract-id> | check --file <checks.json> | check --from-soroforge <url>",
 		Short: "Run a combined health check, exiting non-zero on failure",
 		Long: `Run a combined health check against a contract: confirm it is deployed, that
 its instance and code entries are live and not near expiration, and optionally
@@ -421,6 +426,12 @@ Inside GitHub Actions (GITHUB_ACTIONS is set) each failed or warned step also
 prints an ::error:: or ::warning:: line, which surfaces on the run summary
 instead of hiding in the log. --json and --quiet suppress them.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			if fromSoroForge != "" {
+				if file != "" || len(args) > 0 {
+					return fmt.Errorf("give a contract ID, --file or --from-soroforge, not more than one")
+				}
+				return nil
+			}
 			if file != "" {
 				if len(args) > 0 {
 					return fmt.Errorf("give a contract ID or --file, not both")
@@ -447,6 +458,9 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			}
 			defer func() { err = errors.Join(err, report.close()) }()
 
+			if fromSoroForge != "" {
+				return runCheckSoroForge(cmd, opts, fromSoroForge, soroForgeToken, networkName, checkTimeout, concurrency, report, quiet, outputFormat)
+			}
 			if file != "" {
 				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat)
 			}
@@ -510,7 +524,47 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
+	cmd.Flags().StringVar(&fromSoroForge, "from-soroforge", "", "fetch tracked contracts from this SoroForge URL and check each")
+	cmd.Flags().StringVar(&soroForgeToken, "soroforge-token", "", "read-only SoroForge API token (defaults to SOROFORGE_TOKEN)")
+	cmd.Flags().StringVar(&networkName, "network", "", "network filter when fetching contracts from SoroForge (e.g. testnet, public)")
 	return cmd
+}
+
+func runCheckSoroForge(cmd *cobra.Command, opts *options, baseURL, token, networkName string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool, format string) error {
+	if token == "" {
+		token = os.Getenv("SOROFORGE_TOKEN")
+	}
+	if networkName == "" {
+		networkName = abi.NetworkName(opts.cfg.NetworkPassphrase)
+	}
+	client, err := integration.NewSoroForge(baseURL, token, nil, opts.cfg.Timeout)
+	if err != nil {
+		return err
+	}
+	contracts, err := client.Contracts(cmd.Context(), networkName)
+	if err != nil {
+		return err
+	}
+	if len(contracts) == 0 {
+		return fmt.Errorf("soroforge returned no tracked contracts for network %q", networkName)
+	}
+
+	req := probe.BatchRequest{
+		Checks:      make([]probe.NamedCheck, len(contracts)),
+		Concurrency: concurrency,
+	}
+	for i, c := range contracts {
+		req.Checks[i] = probe.NamedCheck{
+			Name: c.Name,
+			CheckRequest: probe.CheckRequest{
+				ContractID:       c.ContractID,
+				Function:         c.Function,
+				ExpectedWasmHash: c.WasmHash,
+			},
+		}
+	}
+	applyDefaultTimeout(&req, checkTimeout)
+	return executeCheckBatch(cmd, opts, req, report, quiet, format)
 }
 
 func selectOutputFormat(cmd *cobra.Command, opts *options, format string) (string, error) {
@@ -533,7 +587,10 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 	}
 	applyDefaultTimeout(&req, checkTimeout)
 	req.Concurrency = concurrency
+	return executeCheckBatch(cmd, opts, req, report, quiet, format)
+}
 
+func executeCheckBatch(cmd *cobra.Command, opts *options, req probe.BatchRequest, report *reportFile, quiet bool, format string) error {
 	p, cleanup, err := opts.prober()
 	if err != nil {
 		return err

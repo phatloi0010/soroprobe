@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -34,6 +35,9 @@ type CheckRequest struct {
 	DataKeys []string `json:"data_keys,omitempty" yaml:"data_keys,omitempty"`
 	// DataDurability selects the durability DataKeys are read at.
 	DataDurability health.Durability `json:"data_durability,omitempty" yaml:"data_durability,omitempty"`
+	// ExpectedWasmHash, when set, compares the live WASM hash against the
+	// hash recorded in SoroForge or another deployment registry.
+	ExpectedWasmHash string `json:"expected_wasm_hash,omitempty" yaml:"expected_wasm_hash,omitempty"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -105,12 +109,37 @@ var errStop = errors.New("stop checking")
 func (p *Prober) checkSteps() []CheckStep {
 	return []CheckStep{
 		&deployedStep{},
+		&wasmDriftStep{},
 		&instanceTTLStep{},
 		&codeTTLStep{},
 		&dataTTLStep{},
 		&simulateStep{},
 		&expectStep{p: p},
 	}
+}
+
+type wasmDriftStep struct{}
+
+func (s *wasmDriftStep) Name() string { return "wasm_drift" }
+
+func (s *wasmDriftStep) Run(_ context.Context, req CheckRequest, inspect *InspectResult, _ *SimulateResult) ([]Check, error) {
+	if req.ExpectedWasmHash == "" {
+		return nil, nil
+	}
+	expected := strings.ToLower(strings.TrimSpace(req.ExpectedWasmHash))
+	live := strings.ToLower(strings.TrimSpace(inspect.WasmHash))
+	if live == expected {
+		return []Check{{
+			Name:    "wasm_drift",
+			Outcome: OutcomePass,
+			Detail:  fmt.Sprintf("live WASM hash matches tracked hash %s", live),
+		}}, nil
+	}
+	return []Check{{
+		Name:    "wasm_drift",
+		Outcome: OutcomeFail,
+		Detail:  fmt.Sprintf("WASM drift detected: live hash %q does not match tracked hash %q", live, expected),
+	}}, nil
 }
 
 // expectStep asserts the simulated call's return value when the request names
