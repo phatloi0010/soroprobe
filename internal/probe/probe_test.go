@@ -707,3 +707,73 @@ func TestCheckPropagatesTransportErrors(t *testing.T) {
 	_, err := p.Check(context.Background(), probe.CheckRequest{ContractID: stellartest.SACContract})
 	require.Error(t, err)
 }
+
+type staticABISource struct {
+	iface *abi.Interface
+	err   error
+}
+
+func (s staticABISource) Interface(context.Context, string, string) (*abi.Interface, error) {
+	return s.iface, s.err
+}
+
+func TestCheckSoroVaultWasmStep(t *testing.T) {
+	t.Parallel()
+
+	fake := stellartest.NewFake(t)
+	baseProber := newProber(t, fake, health.DefaultThresholds)
+
+	// 1. When no SoroVault is configured, the step is skipped.
+	noVaultRes, err := baseProber.Check(context.Background(), probe.CheckRequest{
+		ContractID: stellartest.WasmContract,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, probe.OutcomeSkip, outcomes(noVaultRes)["sorovault_wasm"])
+	liveHash := noVaultRes.Inspect.WasmHash
+	require.NotEmpty(t, liveHash)
+
+	// 2. When the live WASM matches SoroVault's registered build, the step passes.
+	matchProber, err := probe.New(probe.Options{
+		Client:        fake,
+		SourceAccount: stellartest.SourceAccount,
+		Thresholds:    health.DefaultThresholds,
+		ABI: staticABISource{iface: &abi.Interface{
+			WasmHash: liveHash,
+			Functions: []abi.Function{{
+				Name:   "decimals",
+				Inputs: []abi.Param{{Name: "scale", Type: abi.Type{Kind: "u32", Display: "u32"}}},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+	matchRes, err := matchProber.Check(context.Background(), probe.CheckRequest{
+		ContractID: stellartest.WasmContract,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, probe.OutcomePass, outcomes(matchRes)["sorovault_wasm"])
+
+	// 3. When the live WASM differs from SoroVault's registered build, it WARNs
+	// and disables stale interface typing so simulation proceeds by inference.
+	mismatchProber, err := probe.New(probe.Options{
+		Client:        fake,
+		SourceAccount: stellartest.SourceAccount,
+		Thresholds:    health.DefaultThresholds,
+		ABI: staticABISource{iface: &abi.Interface{
+			WasmHash: "0000000000000000000000000000000000000000000000000000000000000000",
+			Functions: []abi.Function{{
+				// Stale interface claims "decimals" does not exist!
+				Name: "only_old_function",
+			}},
+		}},
+	})
+	require.NoError(t, err)
+	mismatchRes, err := mismatchProber.Check(context.Background(), probe.CheckRequest{
+		ContractID: stellartest.WasmContract,
+		Function:   "decimals",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, probe.OutcomeWarn, outcomes(mismatchRes)["sorovault_wasm"])
+	require.NotNil(t, mismatchRes.Simulate)
+	assert.Empty(t, mismatchRes.Simulate.Signature, "stale interface must not type the simulation")
+	assert.Contains(t, mismatchRes.Simulate.ABINote, "does not match SoroVault registered build")
+}

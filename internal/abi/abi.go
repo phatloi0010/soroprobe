@@ -65,6 +65,9 @@ type Function struct {
 
 // Interface is the part of a contract interface Annotate needs.
 type Interface struct {
+	// WasmHash is the hex-encoded SHA-256 hash of the WASM build SoroVault
+	// cataloged for this contract, when present.
+	WasmHash  string     `json:"wasm_hash,omitempty"`
 	Functions []Function `json:"functions"`
 }
 

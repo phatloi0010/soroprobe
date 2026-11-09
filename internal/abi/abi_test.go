@@ -164,6 +164,7 @@ func TestSoroVaultInterface(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 		  "contract_id": "` + contract + `",
+		  "wasm_hash": "deadbeef1234",
 		  "interface": {"functions": [{"name": "decimals", "inputs": [],
 		    "outputs": [{"kind": "u32", "display": "u32"}]}]}
 		}`))
@@ -177,6 +178,7 @@ func TestSoroVaultInterface(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/api/contracts/"+contract, gotPath)
 	assert.Equal(t, "testnet", gotNetwork)
+	assert.Equal(t, "deadbeef1234", iface.WasmHash)
 
 	fn, err := iface.Lookup("decimals")
 	require.NoError(t, err)

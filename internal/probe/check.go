@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/health"
 	"github.com/soroworks/soroprobe/internal/scval"
 )
@@ -102,15 +104,91 @@ var errStop = errors.New("stop checking")
 // reads the inspect and simulation state Check gathered once, so it cannot add
 // an RPC call by itself. It is built per Prober because some steps, such as the
 // return-value assertion, need the prober's argument codec.
-func (p *Prober) checkSteps() []CheckStep {
+func (p *Prober) checkSteps(vault *sorovaultWasmState) []CheckStep {
 	return []CheckStep{
 		&deployedStep{},
 		&instanceTTLStep{},
 		&codeTTLStep{},
 		&dataTTLStep{},
+		&sorovaultWasmStep{p: p, state: vault},
 		&simulateStep{},
 		&expectStep{p: p},
 	}
+}
+
+type sorovaultWasmState struct {
+	fetched  bool
+	iface    *abi.Interface
+	err      error
+	mismatch bool
+}
+
+type sorovaultWasmStep struct {
+	p     *Prober
+	state *sorovaultWasmState
+}
+
+func (s *sorovaultWasmStep) Name() string { return "sorovault_wasm" }
+
+func (s *sorovaultWasmStep) Run(ctx context.Context, req CheckRequest, inspect *InspectResult, _ *SimulateResult) ([]Check, error) {
+	if s.p.abi == nil {
+		return []Check{{
+			Name:    "sorovault_wasm",
+			Outcome: OutcomeSkip,
+			Detail:  "no SoroVault registry configured",
+		}}, nil
+	}
+	if inspect.Executable != "wasm" {
+		return []Check{{
+			Name:    "sorovault_wasm",
+			Outcome: OutcomeSkip,
+			Detail:  "stellar asset contracts have no WASM build to compare",
+		}}, nil
+	}
+
+	var iface *abi.Interface
+	var err error
+	if s.state != nil && s.state.fetched {
+		iface, err = s.state.iface, s.state.err
+	} else {
+		iface, err = s.p.abi.Interface(ctx, s.p.network, req.ContractID)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, abi.ErrUnknownContract) || errors.Is(err, abi.ErrNoWasm) {
+			return []Check{{
+				Name:    "sorovault_wasm",
+				Outcome: OutcomeSkip,
+				Detail:  "contract is not registered in SoroVault",
+			}}, nil
+		}
+		return []Check{{
+			Name:    "sorovault_wasm",
+			Outcome: OutcomeWarn,
+			Detail:  fmt.Sprintf("could not query SoroVault: %v", err),
+		}}, nil
+	}
+	if iface == nil || iface.WasmHash == "" {
+		return []Check{{
+			Name:    "sorovault_wasm",
+			Outcome: OutcomeSkip,
+			Detail:  "SoroVault record has no cataloged WASM hash",
+		}}, nil
+	}
+	if !strings.EqualFold(iface.WasmHash, inspect.WasmHash) {
+		return []Check{{
+			Name:    "sorovault_wasm",
+			Outcome: OutcomeWarn,
+			Detail:  fmt.Sprintf("live WASM %s does not match SoroVault registered build %s; stale interface disabled", inspect.WasmHash, iface.WasmHash),
+		}}, nil
+	}
+	return []Check{{
+		Name:    "sorovault_wasm",
+		Outcome: OutcomePass,
+		Detail:  fmt.Sprintf("live WASM %s matches SoroVault registered build", inspect.WasmHash),
+	}}, nil
 }
 
 // expectStep asserts the simulated call's return value when the request names
@@ -143,19 +221,44 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 		return nil, err
 	}
 
+	var vaultState sorovaultWasmState
+	if inspect.Deployed && inspect.Executable == "wasm" && p.abi != nil {
+		vaultState.fetched = true
+		vaultState.iface, vaultState.err = p.abi.Interface(ctx, p.network, req.ContractID)
+		if vaultState.err != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if vaultState.err == nil && vaultState.iface != nil && vaultState.iface.WasmHash != "" &&
+			!strings.EqualFold(vaultState.iface.WasmHash, inspect.WasmHash) {
+			vaultState.mismatch = true
+		}
+	}
+
 	// Gather the simulation once, and only when a step can use it: an
 	// undeployed contract fails the first step, and a check without a function
 	// never reports a simulation, so in both cases calling Simulate would spend
 	// an RPC call whose result no step reads.
 	var sim *SimulateResult
 	if inspect.Deployed && req.Function != "" {
-		sim, err = p.Simulate(ctx, SimulateRequest{
+		simProber := p
+		if vaultState.mismatch {
+			copyProber := *p
+			copyProber.abi = nil
+			simProber = &copyProber
+		}
+		sim, err = simProber.Simulate(ctx, SimulateRequest{
 			ContractID: req.ContractID,
 			Function:   req.Function,
 			Args:       req.Args,
 		})
 		if err != nil {
 			return nil, err
+		}
+		if vaultState.mismatch {
+			sim.ABINote = fmt.Sprintf(
+				"live WASM %s does not match SoroVault registered build %s; stale interface disabled",
+				inspect.WasmHash, vaultState.iface.WasmHash,
+			)
 		}
 	}
 
@@ -168,7 +271,7 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 		CloseTimeNote: inspect.CloseTimeNote,
 	}
 
-	for _, step := range p.checkSteps() {
+	for _, step := range p.checkSteps(&vaultState) {
 		checks, err := step.Run(ctx, req, inspect, sim)
 		result.Checks = append(result.Checks, checks...)
 		if err != nil {

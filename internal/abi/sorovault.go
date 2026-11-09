@@ -93,6 +93,7 @@ func (s *SoroVault) Interface(ctx context.Context, network, contractID string) (
 	}
 
 	var payload struct {
+		WasmHash  string     `json:"wasm_hash"`
 		Interface *Interface `json:"interface"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -100,6 +101,9 @@ func (s *SoroVault) Interface(ctx context.Context, network, contractID string) (
 	}
 	if payload.Interface == nil {
 		return nil, errors.New("sorovault: response carried no interface")
+	}
+	if payload.WasmHash != "" && payload.Interface.WasmHash == "" {
+		payload.Interface.WasmHash = payload.WasmHash
 	}
 	return payload.Interface, nil
 }
