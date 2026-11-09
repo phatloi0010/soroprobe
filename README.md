@@ -795,6 +795,7 @@ Precedence, lowest to highest: **defaults → top-level config file keys → pro
 | `CODE_WARN_LEDGERS`, `CODE_CRITICAL_LEDGERS` | `--code-warn-ledgers`, `--code-critical-ledgers` | global thresholds |
 | `DATA_WARN_LEDGERS`, `DATA_CRITICAL_LEDGERS` | `--data-warn-ledgers`, `--data-critical-ledgers` | global thresholds |
 | `SOROVAULT_URL` | `--sorovault-url` | unset — [type arguments from SoroVault](#typing-arguments-from-sorovault) |
+| `SOROVAULT_CACHE_TTL` | `--sorovault-cache-ttl` (on `serve`) | `5m` (`0s` disables) |
 | `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` (then `./soroprobe.yaml`, `./soroprobe.yml`) if present |
 | `SOROPROBE_PROFILE` | `--profile` | unset |
 

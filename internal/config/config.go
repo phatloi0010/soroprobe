@@ -63,6 +63,8 @@ const (
 	DefaultCriticalLedgers = 17_280
 	// DefaultBaseFee is the network minimum base fee in stroops.
 	DefaultBaseFee = int64(100)
+	// DefaultSoroVaultCacheTTL is the default SoroVault interface cache TTL.
+	DefaultSoroVaultCacheTTL = 5 * time.Minute
 )
 
 // Environment variable names.
@@ -79,6 +81,7 @@ const (
 	EnvCriticalLedgers         = "CRITICAL_LEDGERS"
 	EnvConfigFile              = "SOROPROBE_CONFIG"
 	EnvSoroVaultURL            = "SOROVAULT_URL"
+	EnvSoroVaultCacheTTL       = "SOROVAULT_CACHE_TTL"
 	EnvBaseFee                 = "BASE_FEE"
 	EnvInspectCacheTTL         = "INSPECT_CACHE_TTL"
 	EnvAPIToken                = "API_TOKEN"
@@ -132,6 +135,9 @@ type Config struct {
 	// SoroVaultURL, when set, is a SoroVault registry whose recorded contract
 	// interfaces type simulate arguments. Empty disables the lookup.
 	SoroVaultURL string `json:"sorovault_url"`
+	// SoroVaultCacheTTL is how long `serve` caches SoroVault interface lookups.
+	// Zero disables the cache; defaults to 5 minutes.
+	SoroVaultCacheTTL time.Duration `json:"sorovault_cache_ttl"`
 	// InspectCacheTTL is how long `serve` may reuse an inspect result for the
 	// same contract and key set. Zero, the default, disables the cache; a few
 	// seconds suits dashboards, because TTLs change at most once per ledger.
@@ -161,6 +167,7 @@ func Default() Config {
 		WarnLedgers:            DefaultWarnLedgers,
 		CriticalLedgers:        DefaultCriticalLedgers,
 		BaseFee:                DefaultBaseFee,
+		SoroVaultCacheTTL:      DefaultSoroVaultCacheTTL,
 		HTTPRateLimitPerMinute: DefaultRateLimitPerMinute,
 		HTTPRateLimitBurst:     DefaultRateLimitBurst,
 	}
@@ -180,6 +187,7 @@ type fileConfig struct {
 	CriticalLedgers        *uint32                    `json:"critical_ledgers" yaml:"critical_ledgers"`
 	ThresholdOverrides     *health.ThresholdOverrides `json:"thresholds" yaml:"thresholds"`
 	SoroVaultURL           *string                    `json:"sorovault_url" yaml:"sorovault_url"`
+	SoroVaultCacheTTL      *string                    `json:"sorovault_cache_ttl" yaml:"sorovault_cache_ttl"`
 	BaseFee                *int64                     `json:"base_fee" yaml:"base_fee"`
 	InspectCacheTTL        *string                    `json:"inspect_cache_ttl" yaml:"inspect_cache_ttl"`
 	HTTPRateLimitPerMinute *uint32                    `json:"http_rate_limit_per_minute" yaml:"http_rate_limit_per_minute"`
@@ -318,6 +326,13 @@ func applyValues(cfg *Config, path string, fc *fileConfig) error {
 		}
 		cfg.InspectCacheTTL = d
 	}
+	if fc.SoroVaultCacheTTL != nil {
+		d, err := time.ParseDuration(*fc.SoroVaultCacheTTL)
+		if err != nil {
+			return fmt.Errorf("parse config file %s: sorovault_cache_ttl: %w", path, err)
+		}
+		cfg.SoroVaultCacheTTL = d
+	}
 	return nil
 }
 
@@ -411,6 +426,13 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("parse %s: %w", EnvInspectCacheTTL, err)
 		}
 		cfg.InspectCacheTTL = d
+	}
+	if v := lookup(EnvSoroVaultCacheTTL); v != nil {
+		d, err := time.ParseDuration(*v)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", EnvSoroVaultCacheTTL, err)
+		}
+		cfg.SoroVaultCacheTTL = d
 	}
 	if err := setUint32FromEnv(&cfg.WarnLedgers, EnvWarnLedgers); err != nil {
 		return err
@@ -545,6 +567,9 @@ func (c Config) Validate() error {
 	}
 	if c.InspectCacheTTL < 0 {
 		return fmt.Errorf("inspect cache ttl must not be negative, got %s", c.InspectCacheTTL)
+	}
+	if c.SoroVaultCacheTTL < 0 {
+		return fmt.Errorf("sorovault cache ttl must not be negative, got %s", c.SoroVaultCacheTTL)
 	}
 	global := health.Thresholds{Warn: c.WarnLedgers, Critical: c.CriticalLedgers}
 	for _, kind := range []health.EntryKind{health.EntryKindInstance, health.EntryKindCode, health.EntryKindData} {

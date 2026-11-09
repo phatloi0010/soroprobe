@@ -734,6 +734,7 @@ func newServeCmd(opts *options) *cobra.Command {
 	var tlsCert string
 	var tlsKey string
 	var inspectCacheTTL time.Duration
+	var sorovaultCacheTTL time.Duration
 	var apiToken string
 
 	cmd := &cobra.Command{
@@ -753,6 +754,9 @@ token shorter than 16 characters is rejected at startup.`,
 			}
 			if cmd.Flags().Changed("inspect-cache-ttl") {
 				opts.cfg.InspectCacheTTL = inspectCacheTTL
+			}
+			if cmd.Flags().Changed("sorovault-cache-ttl") {
+				opts.cfg.SoroVaultCacheTTL = sorovaultCacheTTL
 			}
 			if tlsCert != "" {
 				opts.cfg.HTTPTLSCert = tlsCert
@@ -793,6 +797,8 @@ token shorter than 16 characters is rejected at startup.`,
 	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS key file, overriding HTTP_TLS_KEY")
 	cmd.Flags().DurationVar(&inspectCacheTTL, "inspect-cache-ttl", 0,
 		"cache inspect results for this long; 0 disables (a few seconds suits dashboards, because TTLs change once per ledger)")
+	cmd.Flags().DurationVar(&sorovaultCacheTTL, "sorovault-cache-ttl", config.DefaultSoroVaultCacheTTL,
+		"cache SoroVault interface lookups for this long; 0 disables")
 	cmd.Flags().StringVar(&apiToken, "api-token", "",
 		fmt.Sprintf("require this bearer token on /v1 routes, overriding %s", config.EnvAPIToken))
 	return cmd

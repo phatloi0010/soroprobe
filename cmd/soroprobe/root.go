@@ -219,6 +219,9 @@ func newLiveProber(cfg config.Config, abiFromChain bool) (*probe.Prober, func(),
 			return nil, nil, err
 		}
 		source = vault
+		if cfg.SoroVaultCacheTTL > 0 {
+			source = abi.NewCachingSource(vault, abi.CacheOptions{TTL: cfg.SoroVaultCacheTTL})
+		}
 	}
 
 	p, err := probe.New(probe.Options{
