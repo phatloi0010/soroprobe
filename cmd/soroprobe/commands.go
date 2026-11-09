@@ -373,6 +373,8 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var adminFn string
+	var adminKey string
 
 	cmd := &cobra.Command{
 		Use:   "check <contract-id> | check --file <checks.json>",
@@ -474,6 +476,8 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
+				AdminFn:        adminFn,
+				AdminKey:       adminKey,
 			})
 			if err != nil {
 				return err
@@ -510,6 +514,8 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
+	cmd.Flags().StringVar(&adminFn, "admin-fn", "", "read-only function returning the contract's admin address")
+	cmd.Flags().StringVar(&adminKey, "admin-key", "", "instance storage or contract data key holding the contract's admin address")
 	return cmd
 }
 

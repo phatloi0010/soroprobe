@@ -342,7 +342,7 @@ type cachedLedgerClient struct {
 	errors  map[string]error
 }
 
-func (c *cachedLedgerClient) GetLedgerEntries(_ context.Context, req protocol.GetLedgerEntriesRequest) (protocol.GetLedgerEntriesResponse, error) {
+func (c *cachedLedgerClient) GetLedgerEntries(ctx context.Context, req protocol.GetLedgerEntriesRequest) (protocol.GetLedgerEntriesResponse, error) {
 	response := protocol.GetLedgerEntriesResponse{}
 	for _, key := range req.Keys {
 		if err := c.errors[key]; err != nil {
@@ -350,7 +350,7 @@ func (c *cachedLedgerClient) GetLedgerEntries(_ context.Context, req protocol.Ge
 		}
 		ledger, ok := c.latest[key]
 		if !ok {
-			return response, fmt.Errorf("batch ledger entry %q was not prefetched", key)
+			return c.Client.GetLedgerEntries(ctx, req)
 		}
 		if response.LatestLedger == 0 {
 			response.LatestLedger = ledger

@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/soroworks/soroprobe/internal/health"
 	"github.com/soroworks/soroprobe/internal/scval"
+	"github.com/soroworks/soroprobe/internal/stellar"
 )
 
 // CheckRequest describes a combined health check.
@@ -34,6 +37,29 @@ type CheckRequest struct {
 	DataKeys []string `json:"data_keys,omitempty" yaml:"data_keys,omitempty"`
 	// DataDurability selects the durability DataKeys are read at.
 	DataDurability health.Durability `json:"data_durability,omitempty" yaml:"data_durability,omitempty"`
+	// AdminFn, when set, names a read-only contract function that returns the
+	// contract's admin address ("G..." or "C...").
+	AdminFn string `json:"admin_fn,omitempty" yaml:"admin_fn,omitempty"`
+	// AdminKey, when set, names an instance storage key or contract data key
+	// holding the contract's admin address.
+	AdminKey string `json:"admin_key,omitempty" yaml:"admin_key,omitempty"`
+}
+
+// AdminPosture describes a contract's resolved admin and its security posture.
+type AdminPosture struct {
+	Address       string   `json:"address"`
+	Kind          string   `json:"kind"`
+	Source        string   `json:"source"`
+	MasterWeight  uint8    `json:"master_weight"`
+	ThresholdLow  uint8    `json:"threshold_low"`
+	ThresholdMed  uint8    `json:"threshold_med"`
+	ThresholdHigh uint8    `json:"threshold_high"`
+	SignerCount   int      `json:"signer_count"`
+	Signers       []string `json:"signers,omitempty"`
+	SingleKey     bool     `json:"single_key,omitempty"`
+	MainnetRisk   bool     `json:"mainnet_risk,omitempty"`
+	Executable    string   `json:"executable,omitempty"`
+	WasmHash      string   `json:"wasm_hash,omitempty"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -70,6 +96,8 @@ type CheckResult struct {
 	Inspect *InspectResult `json:"inspect,omitempty"`
 	// Simulate is the invocation result, when a function was given.
 	Simulate *SimulateResult `json:"simulate,omitempty"`
+	// Admin is the resolved admin security posture, when requested.
+	Admin *AdminPosture `json:"admin,omitempty"`
 	// LatestLedger is the ledger the assessment was made against.
 	LatestLedger uint32 `json:"latest_ledger"`
 	// CloseTimeNote explains the measured duration estimate or its fallback.
@@ -177,6 +205,15 @@ func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, err
 			}
 			return nil, err
 		}
+	}
+
+	if inspect.Deployed && (req.AdminFn != "" || req.AdminKey != "") {
+		adminCheck, posture, err := p.evaluateAdminPosture(ctx, req, inspect)
+		if err != nil {
+			return nil, err
+		}
+		result.Admin = posture
+		result.Checks = append(result.Checks, adminCheck)
 	}
 
 	result.OK = true
@@ -399,4 +436,229 @@ func formatVal(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+func (p *Prober) evaluateAdminPosture(ctx context.Context, req CheckRequest, inspect *InspectResult) (Check, *AdminPosture, error) {
+	addr, source, err := p.resolveAdminAddress(ctx, req, inspect)
+	if err != nil {
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomeFail,
+			Detail:  err.Error(),
+		}, nil, nil
+	}
+
+	posture := &AdminPosture{
+		Address: addr,
+		Source:  source,
+	}
+
+	if strings.HasPrefix(addr, "C") {
+		posture.Kind = "contract"
+		adminInspect, err := p.Inspect(ctx, InspectRequest{ContractID: addr})
+		if err != nil {
+			return Check{}, nil, err
+		}
+		if !adminInspect.Deployed {
+			return Check{
+				Name:    "admin_posture",
+				Outcome: OutcomeFail,
+				Detail:  fmt.Sprintf("admin contract %s (from %s) is not deployed on this network", addr, source),
+			}, posture, nil
+		}
+		posture.Executable = adminInspect.Executable
+		posture.WasmHash = adminInspect.WasmHash
+		detail := fmt.Sprintf("admin %s (from %s) is a contract (executable: %s", addr, source, adminInspect.Executable)
+		if adminInspect.WasmHash != "" {
+			detail += fmt.Sprintf(", wasm_hash: %s)", adminInspect.WasmHash)
+		} else {
+			detail += ")"
+		}
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomePass,
+			Detail:  detail,
+		}, posture, nil
+	}
+
+	if !strings.HasPrefix(addr, "G") {
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomeFail,
+			Detail:  fmt.Sprintf("resolved admin %q (from %s) is neither a G... account nor a C... contract", addr, source),
+		}, posture, nil
+	}
+
+	posture.Kind = "account"
+	acctKey, err := stellar.AccountKey(addr)
+	if err != nil {
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomeFail,
+			Detail:  fmt.Sprintf("invalid admin account %q: %v", addr, err),
+		}, posture, nil
+	}
+	encodedKey, err := stellar.EncodeKey(acctKey)
+	if err != nil {
+		return Check{}, nil, err
+	}
+
+	resp, err := p.client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: []string{encodedKey}})
+	if err != nil {
+		return Check{}, nil, err
+	}
+	if len(resp.Entries) == 0 {
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomeFail,
+			Detail:  fmt.Sprintf("admin account %s (from %s) not found on ledger", addr, source),
+		}, posture, nil
+	}
+
+	data, err := stellar.DecodeEntryData(resp.Entries[0].DataXDR)
+	if err != nil {
+		return Check{}, nil, err
+	}
+	if data.Account == nil {
+		return Check{}, nil, fmt.Errorf("ledger entry for %s is not an account (got %s)", addr, data.Type)
+	}
+	acc := data.Account
+
+	master := acc.MasterKeyWeight()
+	low := acc.ThresholdLow()
+	med := acc.ThresholdMedium()
+	high := acc.ThresholdHigh()
+
+	var signers []string
+	if master > 0 {
+		signers = append(signers, fmt.Sprintf("%s (master, weight %d)", addr, master))
+	}
+	for _, s := range acc.Signers {
+		if s.Weight > 0 {
+			signers = append(signers, fmt.Sprintf("%s (weight %d)", s.Key.Address(), s.Weight))
+		}
+	}
+
+	posture.MasterWeight = master
+	posture.ThresholdLow = low
+	posture.ThresholdMed = med
+	posture.ThresholdHigh = high
+	posture.SignerCount = len(signers)
+	posture.Signers = signers
+
+	singleKey := len(signers) <= 1 && master > 0
+	posture.SingleKey = singleKey
+	isMainnet := p.network == "public" || p.network == "mainnet"
+	if singleKey && isMainnet {
+		posture.MainnetRisk = true
+	}
+
+	summary := fmt.Sprintf(
+		"admin account %s (from %s): %d signer(s), master weight %d, thresholds low=%d/med=%d/high=%d",
+		addr, source, len(signers), master, low, med, high,
+	)
+	if singleKey {
+		if posture.MainnetRisk {
+			summary = "MAINNET SINGLE-KEY ADMIN: " + summary + " (single signer with master weight)"
+		} else {
+			summary += " (single signer with master weight)"
+		}
+		return Check{
+			Name:    "admin_posture",
+			Outcome: OutcomeWarn,
+			Detail:  summary,
+		}, posture, nil
+	}
+
+	return Check{
+		Name:    "admin_posture",
+		Outcome: OutcomePass,
+		Detail:  summary,
+	}, posture, nil
+}
+
+func (p *Prober) resolveAdminAddress(ctx context.Context, req CheckRequest, inspect *InspectResult) (string, string, error) {
+	if req.AdminFn != "" {
+		sim, err := p.Simulate(ctx, SimulateRequest{
+			ContractID: req.ContractID,
+			Function:   req.AdminFn,
+		})
+		if err != nil {
+			return "", "", err
+		}
+		if !sim.Success {
+			return "", "", fmt.Errorf("resolving admin via %s() failed: %s", req.AdminFn, sim.Error)
+		}
+		addr, ok := extractAddressString(sim.ReturnValue)
+		if !ok {
+			return "", "", fmt.Errorf("function %s() returned %v, not an address", req.AdminFn, sim.ReturnValue)
+		}
+		return addr, "function:" + req.AdminFn, nil
+	}
+
+	if m, ok := inspect.InstanceStorage.(map[string]any); ok {
+		candidates := []string{req.AdminKey}
+		if idx := strings.IndexByte(req.AdminKey, ':'); idx >= 0 {
+			candidates = append(candidates, strings.Trim(req.AdminKey[idx+1:], `"`))
+		}
+		for _, k := range candidates {
+			if raw, exists := m[k]; exists {
+				if addr, ok := extractAddressString(raw); ok {
+					return addr, "key:" + req.AdminKey, nil
+				}
+			}
+		}
+	}
+
+	contract, err := stellar.ParseContractID(req.ContractID)
+	if err != nil {
+		return "", "", err
+	}
+	keyVal, err := p.codec.Encode(req.AdminKey)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid admin key %q: %w", req.AdminKey, err)
+	}
+	durability := xdr.ContractDataDurabilityPersistent
+	if req.DataDurability == health.DurabilityTemporary {
+		durability = xdr.ContractDataDurabilityTemporary
+	}
+	lk := stellar.DataKey(contract, keyVal, durability)
+	encoded, err := stellar.EncodeKey(lk)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := p.client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: []string{encoded}})
+	if err != nil {
+		return "", "", err
+	}
+	if len(resp.Entries) == 0 {
+		return "", "", fmt.Errorf("admin key %q not found in instance storage or contract data", req.AdminKey)
+	}
+	data, err := stellar.DecodeEntryData(resp.Entries[0].DataXDR)
+	if err != nil {
+		return "", "", err
+	}
+	if data.ContractData == nil {
+		return "", "", fmt.Errorf("admin key %q is not contract data", req.AdminKey)
+	}
+	decoded, err := p.codec.Decode(data.ContractData.Val)
+	if err != nil {
+		return "", "", err
+	}
+	addr, ok := extractAddressString(decoded)
+	if !ok {
+		return "", "", fmt.Errorf("admin key %q holds %v, not an address", req.AdminKey, decoded)
+	}
+	return addr, "key:" + req.AdminKey, nil
+}
+
+func extractAddressString(v any) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	if strings.HasPrefix(s, "G") || strings.HasPrefix(s, "C") {
+		return s, true
+	}
+	return "", false
 }

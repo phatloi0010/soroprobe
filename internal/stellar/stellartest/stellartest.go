@@ -290,6 +290,37 @@ func (f *Fake) SetTTL(t testing.TB, key string, liveUntil uint32) {
 	f.Entries[key] = entry
 }
 
+// SetAccountSigners stores an AccountEntry with the given thresholds ([master, low, med, high])
+// and additional signers in the fake's ledger.
+func (f *Fake) SetAccountSigners(t testing.TB, accountID string, thresholds [4]byte, signers []xdr.Signer) {
+	t.Helper()
+	lk, err := stellar.AccountKey(accountID)
+	if err != nil {
+		t.Fatalf("account key: %v", err)
+	}
+	keyXDR, err := stellar.EncodeKey(lk)
+	if err != nil {
+		t.Fatalf("encode account key: %v", err)
+	}
+	data := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeAccount,
+		Account: &xdr.AccountEntry{
+			AccountId:  lk.Account.AccountId,
+			Balance:    xdr.Int64(100_000_000),
+			Thresholds: xdr.Thresholds(thresholds),
+			Signers:    signers,
+		},
+	}
+	dataXDR, err := xdr.MarshalBase64(data)
+	if err != nil {
+		t.Fatalf("encode account data: %v", err)
+	}
+	f.Entries[keyXDR] = protocol.LedgerEntryResult{
+		KeyXDR:  keyXDR,
+		DataXDR: dataXDR,
+	}
+}
+
 // InstanceKeyOf returns the base64 instance ledger key for a contract, which is
 // how tests address entries in the fake.
 func InstanceKeyOf(t testing.TB, contractID string) string {
